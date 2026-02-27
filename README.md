@@ -18,6 +18,30 @@ npm run build
 npm run preview   # preview production build
 ```
 
+## Deploy to Heroku
+
+The project is set up for Heroku: it uses the **Node** buildpack, builds with Vite on deploy, and serves the static app with `serve`.
+
+1. **Install the Heroku CLI** and log in: [https://devcenter.heroku.com/articles/heroku-cli](https://devcenter.heroku.com/articles/heroku-cli)
+
+2. **Create the app** (from the project root):
+   ```bash
+   heroku create
+   ```
+   Or with a name: `heroku create your-app-name`
+
+3. **Deploy**:
+   ```bash
+   git add .
+   git commit -m "Prepare for Heroku"
+   git push heroku main
+   ```
+   If your default branch is `master`: `git push heroku master`
+
+4. **Open the app**: `heroku open`
+
+Heroku will run `npm run build` (via `heroku-postbuild`) and then `npm start` (serves the `dist` folder with SPA fallback). Node version is set to **20.x** in `package.json` (`engines.node`).
+
 ## What’s included (UI only)
 
 - **Header**: Airtel logo, Sales Console launcher, global search, nav (Home, Quote, Contacts, Service, Sales, Accounts, Dashboards, Reports, More), utility icons, profile.
