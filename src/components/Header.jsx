@@ -19,18 +19,31 @@ function getStoredQuoteRestore(key) {
 const DEFAULT_QUOTE_PANEL_SNAPSHOT = {
   isConversationView: true,
   messages: [
-    { id: 'create-quote-welcome', role: 'agent', text: 'Hi! I am here to assist you to "Create a Quote". Please upload files of locations in CSV or XLSX files or PDF format, along with your requirement details' },
+    { id: 'create-quote-welcome', role: 'agent', text: 'Hi! I can assist you with that. You can upload the document directly. Would you like to proceed with uploading a document or another type of document?' },
     { id: 'upload-quote', role: 'user', text: 'Uploaded "Quote Proposal Data.pdf"' },
-    { id: 'extraction-done', role: 'agent', text: 'Extraction of Data is Complete' },
+    { id: 'extraction-done', role: 'agent', text: 'Your file is being processed, you will be notified once done, or you can check the status here' },
   ],
   hasNotification: true,
 }
 
-function Header({ activeNavTab = 'Quote', onNavClick, restoreQuoteAgentforceKey, quoteActionsRef }) {
+function Header({ activeNavTab = 'Quote', onNavClick, onNavigateToQuoteExtractedInfo, onNavigateToUpdatedQuote, updatedQuoteNotification = false, onNavigateToUpdatedQuote2, updatedQuoteProposal2Notification = false, onNavigateToUpdatedQuote3, updatedQuoteProposal3Notification = false, onNavigateToUpdatedQuote4, updatedQuoteProposal4Notification = false, attributesUpdatedNotification = false, onAttributesUpdated, onNavigateToAttributesUpdatedView, restoreQuoteAgentforceKey, quoteActionsRef }) {
   const stored = restoreQuoteAgentforceKey ? getStoredQuoteRestore(restoreQuoteAgentforceKey) : null
   const [agentforcePanelOpen, setAgentforcePanelOpen] = useState(!!(stored?.panelOpen))
   const [bellNotification, setBellNotification] = useState(false)
+  const [notificationPopoverOpen, setNotificationPopoverOpen] = useState(false)
   const panelStateRef = useRef(null)
+  const notificationPopoverRef = useRef(null)
+
+  useEffect(() => {
+    if (!notificationPopoverOpen) return
+    const handleClickOutside = (e) => {
+      if (notificationPopoverRef.current && !notificationPopoverRef.current.contains(e.target)) {
+        setNotificationPopoverOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [notificationPopoverOpen])
   const hadRestoreFromStorageRef = useRef(!!(stored?.panelOpen))
   const initialRestoreSnapshotRef = useRef(
     stored?.snapshot && typeof stored.snapshot.isConversationView === 'boolean' && Array.isArray(stored.snapshot.messages)
@@ -63,7 +76,7 @@ function Header({ activeNavTab = 'Quote', onNavClick, restoreQuoteAgentforceKey,
 
   return (
     <>
-    <header className="bg-white border-b border-gray-200 sticky top-0 z-50">
+    <header className="bg-white border-b border-gray-200 sticky top-0 z-[60]">
       {/* Top row: logo (left), search (center), utility icons (right) */}
       <div className="flex items-center justify-between gap-4 px-6 py-3">
         <div className="shrink-0 w-[120px]">
@@ -131,19 +144,157 @@ function Header({ activeNavTab = 'Quote', onNavClick, restoreQuoteAgentforceKey,
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
             </svg>
           </button>
-          <button
-            type="button"
-            onClick={() => { setBellNotification(false); onNavClick?.('Quote') }}
-            className="relative p-2 rounded-full text-gray-600 hover:bg-gray-100"
-            aria-label="Notifications"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
-            </svg>
-            {bellNotification && (
-              <span className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-red-500 ring-2 ring-white" aria-hidden="true" />
+          <div className="relative" ref={notificationPopoverRef}>
+            <button
+              type="button"
+              onClick={() => setNotificationPopoverOpen((prev) => !prev)}
+              className="relative p-2 rounded-full text-gray-600 hover:bg-gray-100"
+              aria-label="Notifications"
+              aria-expanded={notificationPopoverOpen}
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
+              </svg>
+              {(bellNotification || updatedQuoteNotification || updatedQuoteProposal2Notification || updatedQuoteProposal3Notification || updatedQuoteProposal4Notification || attributesUpdatedNotification) && (
+                <span className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-red-500 ring-2 ring-white" aria-hidden="true" />
+              )}
+            </button>
+            {notificationPopoverOpen && (
+              <div className="absolute right-0 top-full mt-1 z-[70] w-80 bg-white rounded-lg shadow-lg border border-gray-200 overflow-hidden">
+                <div className="absolute -top-2 right-4 w-4 h-4 bg-white border-l border-t border-gray-200 transform rotate-45" aria-hidden="true" />
+                <div className="relative bg-white rounded-lg">
+                  <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
+                    <h3 className="text-sm font-semibold text-gray-900">Notifications</h3>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => { setBellNotification(false); setNotificationPopoverOpen(false) }}
+                        className="text-xs font-medium text-blue-600 hover:text-blue-700"
+                      >
+                        Mark all as read
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setNotificationPopoverOpen(false)}
+                        className="p-1 rounded text-gray-500 hover:bg-gray-100"
+                        aria-label="Close notifications"
+                      >
+                        <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                          <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                  <div className="max-h-64 overflow-y-auto py-2">
+                    {(() => {
+                      const mostRecent = attributesUpdatedNotification ? 'attributes' : updatedQuoteProposal4Notification ? 'proposal4' : updatedQuoteProposal3Notification ? 'proposal3' : updatedQuoteProposal2Notification ? 'proposal2' : updatedQuoteNotification ? 'proposal1' : 'new'
+                      const linkClass = (isRecent) => isRecent ? 'text-sm font-semibold text-blue-600 hover:text-blue-800 hover:underline text-left w-full' : 'text-sm font-semibold text-gray-400 hover:text-gray-600 text-left w-full'
+                      const timeClass = (isRecent) => isRecent ? 'text-xs text-gray-600 mt-0.5' : 'text-xs text-gray-400 mt-0.5'
+                      return (
+                        <>
+                    {attributesUpdatedNotification && (
+                      <div className="px-4 py-3 hover:bg-gray-50 border-b border-gray-100">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onNavigateToAttributesUpdatedView?.()
+                            setNotificationPopoverOpen(false)
+                            setAgentforcePanelOpen(false)
+                          }}
+                          className={linkClass(mostRecent === 'attributes')}
+                        >
+                          Attributes updated
+                        </button>
+                        <p className={timeClass(mostRecent === 'attributes')}>Just now</p>
+                      </div>
+                    )}
+                    {updatedQuoteProposal4Notification && (
+                      <div className={`px-4 py-3 hover:bg-gray-50 ${(updatedQuoteProposal3Notification || attributesUpdatedNotification) ? 'border-b border-gray-100' : ''}`}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onNavigateToUpdatedQuote4?.()
+                            setNotificationPopoverOpen(false)
+                            setAgentforcePanelOpen(false)
+                          }}
+                          className={linkClass(mostRecent === 'proposal4')}
+                        >
+                          Updated Quote Proposal 4
+                        </button>
+                        <p className={timeClass(mostRecent === 'proposal4')}>Just now</p>
+                      </div>
+                    )}
+                    {(updatedQuoteProposal3Notification || updatedQuoteProposal4Notification) && (
+                      <div className={`px-4 py-3 hover:bg-gray-50 ${updatedQuoteProposal4Notification ? 'border-b border-gray-100' : 'border-b border-gray-100'}`}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onNavigateToUpdatedQuote3?.()
+                            setNotificationPopoverOpen(false)
+                            setAgentforcePanelOpen(false)
+                          }}
+                          className={linkClass(mostRecent === 'proposal3')}
+                        >
+                          Updated Quote Proposal 3
+                        </button>
+                        <p className={timeClass(mostRecent === 'proposal3')}>Just now</p>
+                      </div>
+                    )}
+                    {(updatedQuoteProposal2Notification || updatedQuoteProposal3Notification || updatedQuoteProposal4Notification) && (
+                      <div className={`px-4 py-3 hover:bg-gray-50 ${(updatedQuoteProposal3Notification || updatedQuoteProposal4Notification) ? 'border-b border-gray-100' : ''}`}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onNavigateToUpdatedQuote2?.()
+                            setNotificationPopoverOpen(false)
+                            setAgentforcePanelOpen(false)
+                          }}
+                          className={linkClass(mostRecent === 'proposal2')}
+                        >
+                          Updated Quote Proposal 2
+                        </button>
+                        <p className={timeClass(mostRecent === 'proposal2')}>Just now</p>
+                      </div>
+                    )}
+                    {(updatedQuoteNotification || updatedQuoteProposal2Notification || updatedQuoteProposal3Notification || updatedQuoteProposal4Notification || attributesUpdatedNotification) && (
+                      <div className={`px-4 py-3 hover:bg-gray-50 ${updatedQuoteProposal2Notification ? 'border-b border-gray-100' : ''}`}>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onNavigateToUpdatedQuote?.()
+                            setNotificationPopoverOpen(false)
+                            setAgentforcePanelOpen(false)
+                          }}
+                          className={linkClass(mostRecent === 'proposal1')}
+                        >
+                          Updated Quote Proposal
+                        </button>
+                        <p className={timeClass(mostRecent === 'proposal1')}>Just now</p>
+                      </div>
+                    )}
+                    <div className={`px-4 py-3 hover:bg-gray-50 ${(updatedQuoteNotification || updatedQuoteProposal2Notification || updatedQuoteProposal3Notification || updatedQuoteProposal4Notification || attributesUpdatedNotification) ? 'border-b border-gray-100' : ''} last:border-b-0`}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onNavigateToQuoteExtractedInfo?.()
+                          setNotificationPopoverOpen(false)
+                          setBellNotification(false)
+                          setAgentforcePanelOpen(false)
+                        }}
+                        className={linkClass(mostRecent === 'new')}
+                      >
+                        New Quote Proposal created
+                      </button>
+                      <p className={timeClass(mostRecent === 'new')}>15 seconds ago</p>
+                    </div>
+                        </>
+                      )
+                    })()}
+                  </div>
+                </div>
+              </div>
             )}
-          </button>
+          </div>
           <button type="button" className="p-1 rounded-full overflow-hidden hover:ring-2 hover:ring-gray-200 focus:outline-none" aria-label="User menu">
             <div className="w-9 h-9 rounded-full bg-amber-200 flex items-center justify-center overflow-hidden border-2 border-amber-300">
               <svg className="w-6 h-6 text-amber-700" fill="currentColor" viewBox="0 0 24 24">
@@ -191,6 +342,14 @@ function Header({ activeNavTab = 'Quote', onNavClick, restoreQuoteAgentforceKey,
         open={agentforcePanelOpen}
         quoteActionsRef={quoteActionsRef}
         activeNavTab={activeNavTab}
+        onNavigateToQuote={() => {
+          onNavigateToQuoteExtractedInfo?.()
+          setAgentforcePanelOpen(false)
+        }}
+        onNavigateToUpdatedQuote={() => {
+          onNavigateToUpdatedQuote?.()
+          setAgentforcePanelOpen(false)
+        }}
         onClose={() => {
           setAgentforcePanelOpen(false)
           if (restoreQuoteAgentforceKey && activeNavTab === 'Quote') {
@@ -198,6 +357,11 @@ function Header({ activeNavTab = 'Quote', onNavClick, restoreQuoteAgentforceKey,
           }
         }}
         onAnalysisComplete={() => setBellNotification(true)}
+        onAttributesUpdated={onAttributesUpdated}
+        onNavigateToQuoteView={(productName) => {
+          onNavigateToAttributesUpdatedView?.(productName)
+          setAgentforcePanelOpen(false)
+        }}
         initialRestoreSnapshot={snapshotToPass}
         onPanelStateChange={(snapshot) => {
           panelStateRef.current = snapshot

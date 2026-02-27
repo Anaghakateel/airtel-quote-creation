@@ -424,7 +424,18 @@ function SummaryTabContent({ locations = [], onTotalsChange }) {
                     <input type="checkbox" className="rounded-md border-gray-300 text-blue-600 w-3.5 h-3.5" aria-label="Select row" />
                   </td>
                   <td className="px-2 py-1 text-gray-800 align-middle min-w-0 truncate" title={row.memberGroup}>{row.memberGroup || '—'}</td>
-                  <td className="px-2 py-1 text-gray-800 align-middle truncate">{row.product}</td>
+                  <td className="px-2 py-1 text-gray-800 align-middle truncate">
+                    <span className="inline-flex items-center gap-1.5 min-w-0">
+                      {row.feasibilityStatus === 'Failure' && (
+                        <span className="shrink-0 flex items-center justify-center text-red-600" title="Product has feasibility/attribute error that needs fixing" aria-hidden>
+                          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
+                            <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                          </svg>
+                        </span>
+                      )}
+                      <span className="truncate">{row.product}</span>
+                    </span>
+                  </td>
                   <td className="px-2 py-1 align-middle">
                     <FeasibilityBadge status={row.feasibilityStatus} />
                   </td>

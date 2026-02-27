@@ -233,8 +233,8 @@ function StatusPill({ status }) {
   )
 }
 
-// Scoped notification bar: success (blue), error (red), warning (yellow). Optional onDismiss shows close icon.
-function ScopedNotificationBar({ variant = 'success', locationsCount, productsCount, onDismiss }) {
+// Scoped notification bar: success (blue), error (red), warning (yellow). Optional message overrides default. Optional onDismiss shows close icon.
+function ScopedNotificationBar({ variant = 'success', locationsCount, productsCount, message: messageProp, onDismiss }) {
   const config = {
     success: {
       bg: 'bg-[#E4EDFC]',
@@ -266,7 +266,7 @@ function ScopedNotificationBar({ variant = 'success', locationsCount, productsCo
     },
   }
   const { bg, icon, textColor, closeColor } = config[variant] || config.success
-  const message = `${locationsCount} locations were successfully extracted and ${productsCount} required products are successfully provided for each location based on the requirement.`
+  const message = messageProp ?? `${locationsCount} locations were successfully extracted and ${productsCount} requested products are successfully provided for each location based on the request.`
   return (
     <div className="px-4 pt-4 pb-2">
       <div className={`flex items-center gap-3 px-4 py-2.5 rounded-xl ${bg}`} role="status">
@@ -302,6 +302,12 @@ function DataTableSection({
   onLocationsData,
   notificationVariant: notificationVariantProp,
   quoteActionsRef,
+  showMatchedResults = false,
+  onMatchValidationComplete,
+  showAttributesPrefilledNotification = false,
+  onDismissAttributesPrefilled,
+  revealMatchedResultsInProgress = false,
+  onRevealComplete,
 }) {
   const continuedRecordIds = continuedRecordIdsProp ?? new Set()
   const [displayedCount, setDisplayedCount] = useState(10)
@@ -351,6 +357,7 @@ function DataTableSection({
   const [editingCell, setEditingCell] = useState(null) // { rowId, column: 'technology' | 'requestedProducts' | 'postalCode' }
   const [cellEdits, setCellEdits] = useState(() => ({})) // { [rowId]: { technology?, requestedProducts?, postalCode? } }
   const [matchResults, setMatchResults] = useState(() => ({})) // { [rowId]: { matchedProducts, matchingStatus, confidenceLevel? } } from "Match All Products"
+  const pendingMatchResultsRef = useRef({}) // filled after Match All completes; applied to matchResults when user clicks "Updated Quote Proposal"
   const [isMatchLoading, setIsMatchLoading] = useState(false)
   const [rowsWithStatusChange, setRowsWithStatusChange] = useState(() => new Set()) // row IDs to show "Updated" badge
   const statusChangeTimeoutsRef = useRef({})
@@ -374,7 +381,8 @@ function DataTableSection({
   const dataRows = ALL_ROWS.filter(
     (r) => !deletedIds.has(r.id) && !(continuedRecordIds && continuedRecordIds.has(r.id))
   )
-  const dataRowsWithEdits = dataRows.map((row) => ({ ...row, ...cellEdits[row.id], ...matchResults[row.id] }))
+  const effectiveMatchResults = showMatchedResults ? matchResults : {}
+  const dataRowsWithEdits = dataRows.map((row) => ({ ...row, ...cellEdits[row.id], ...effectiveMatchResults[row.id] }))
 
   // All matched product options for filter dropdown (flatten MATCHED_PRODUCTS_OPTIONS)
   const ALL_MATCHED_PRODUCT_OPTIONS = Object.values(MATCHED_PRODUCTS_OPTIONS).flat()
@@ -523,6 +531,8 @@ function DataTableSection({
 
   // When grouped by Technology or Requested Products (and not sorting by Confidence), insert section header rows
   const TABLE_COLUMN_COUNT = 11
+  const showDataReasoningColumn = validationResult != null
+  const effectiveColumnCount = showDataReasoningColumn ? TABLE_COLUMN_COUNT : TABLE_COLUMN_COUNT - 1
   const tbodyItems = (() => {
     if (viewByValue === 'All' || confidenceSortDirection != null) return visibleRows.map((row) => ({ type: 'row', row }))
     const key = viewByValue === 'Technology' ? 'technology' : 'requestedProducts'
@@ -666,7 +676,7 @@ function DataTableSection({
   const editingRowForBulk = isBulkEditColumn && editingCell?.rowId ? dataRowsWithEdits.find((r) => r.id === editingCell.rowId) : null
 
   const handleMatchAllProducts = () => {
-    setIsMatchLoading(true)
+    onMatchValidationComplete?.()
     setTimeout(() => {
       const next = {}
       dataRows.forEach((row) => {
@@ -676,10 +686,21 @@ function DataTableSection({
         const status = pick(MATCHING_STATUSES)
         next[row.id] = { matchedProducts: matched, matchingStatus: status, confidenceLevel: getConfidenceLevelForMatchingStatus(status) }
       })
-      setMatchResults(next)
-      setIsMatchLoading(false)
+      pendingMatchResultsRef.current = next
     }, 2000)
   }
+
+  useEffect(() => {
+    if (showMatchedResults && Object.keys(pendingMatchResultsRef.current || {}).length > 0) {
+      setMatchResults({ ...pendingMatchResultsRef.current })
+    }
+  }, [showMatchedResults])
+
+  useEffect(() => {
+    if (!revealMatchedResultsInProgress || !onRevealComplete) return
+    const t = setTimeout(() => { onRevealComplete() }, 1000)
+    return () => clearTimeout(t)
+  }, [revealMatchedResultsInProgress, onRevealComplete])
 
   const applyBulkPostalCode = (postalCode) => {
     const ids = Array.from(selectedRowIds)
@@ -1083,6 +1104,12 @@ function DataTableSection({
             </button>
           </div>
         </div>
+      ) : showAttributesPrefilledNotification ? (
+        <ScopedNotificationBar
+          variant="success"
+          message="Attributes pre-filled based on 47 similar past orders for SDWAN/ HDFC Bank / 500089. Review and adjust as needed."
+          onDismiss={onDismissAttributesPrefilled}
+        />
       ) : !scopedNotificationDismissed ? (
         <ScopedNotificationBar
           variant={notificationVariant}
@@ -1281,8 +1308,12 @@ function DataTableSection({
             </div>
             <button
               type="button"
-              onClick={() => { setSearchFilter(searchInput.trim() || null); setShowSearchSuggestions(false) }}
-              className="p-1.5 border border-blue-600 rounded-full bg-white text-blue-600 hover:bg-blue-50 flex items-center justify-center w-9 h-9"
+              onClick={() => {
+                setSearchFilter(searchInput.trim() || null)
+                setShowSearchSuggestions(false)
+                setSearchInput('')
+              }}
+              className="shrink-0 h-7 w-7 flex items-center justify-center rounded-full border border-blue-600 bg-white text-blue-600 hover:bg-blue-50"
               aria-label="Search"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1291,8 +1322,23 @@ function DataTableSection({
             </button>
             <button
               type="button"
+              onClick={() => {
+                setSearchFilter(null)
+                setSearchInput('')
+                setShowSearchSuggestions(false)
+              }}
+              className="shrink-0 h-7 w-7 flex items-center justify-center rounded-full border border-blue-600 bg-white text-blue-600 hover:bg-blue-50"
+              aria-label="Refresh list"
+              title="Show full list (clear search)"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
+            </button>
+            <button
+              type="button"
               onClick={handleMatchAllProducts}
-              className="px-4 py-1.5 border border-gray-300 rounded-full bg-white text-blue-600 text-xs font-medium hover:bg-gray-50"
+              className="px-4 py-1.5 rounded-full border border-blue-600 bg-white text-blue-600 text-xs font-medium hover:bg-blue-50"
             >
               Match All Products
             </button>
@@ -1334,14 +1380,16 @@ function DataTableSection({
       <div className="overflow-x-auto flex flex-col min-h-0" style={{ height: '24rem' }}>
         {/* Scrollable: fixed height for 10 rows so all 10 visible without scrolling */}
         <div className="relative overflow-y-auto border-b border-gray-100 min-h-0" style={{ height: '22rem' }}>
-          {validationInProgress && (
+          {(validationInProgress || isMatchLoading || revealMatchedResultsInProgress) && (
             <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-white/90" aria-live="polite">
               <div className="flex gap-1" aria-hidden="true">
                 {[0, 1, 2, 3, 4, 5].map((i) => (
                   <span key={i} className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" style={{ animationDelay: `${i * 0.1}s` }} />
                 ))}
               </div>
-              <p className="text-sm font-semibold text-gray-700">Validation in progress...</p>
+              <p className="text-sm font-semibold text-gray-700">
+                {(isMatchLoading || revealMatchedResultsInProgress) ? 'Data is getting Validated' : 'Validation in progress...'}
+              </p>
             </div>
           )}
           <table className="w-full text-xs leading-tight table-fixed">
@@ -1435,7 +1483,9 @@ function DataTableSection({
                     </button>
                   </span>
                 </th>
-                <th className="w-32 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs" title="Data Reasoning">Data Reasoning</th>
+                {showDataReasoningColumn && (
+                  <th className="w-32 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs" title="Data Reasoning">Data Reasoning</th>
+                )}
                 <th className="w-9 px-2 py-1" aria-label="Row actions" />
               </tr>
             </thead>
@@ -1443,7 +1493,7 @@ function DataTableSection({
               {tbodyItems.map((item, idx) =>
                 item.type === 'group' ? (
                   <tr key={`group-${item.label}-${idx}`} className="bg-gray-100 border-b border-gray-200">
-                    <td colSpan={TABLE_COLUMN_COUNT} className="pl-4 py-2 text-xs font-semibold text-gray-700">
+                    <td colSpan={effectiveColumnCount} className="pl-4 py-2 text-xs font-semibold text-gray-700">
                       {item.label}
                     </td>
                   </tr>
@@ -1700,26 +1750,28 @@ function DataTableSection({
                       )}
                     </div>
                   </td>
-                  <td className="px-2 py-1 text-gray-800 align-middle min-w-0">
-                    {validationByRowId && validationByRowId[item.row.id] ? (
-                      validationByRowId[item.row.id].valid ? (
-                        <div className="inline-flex items-center gap-1.5">
-                          <span className="flex items-center justify-center w-5 h-5 rounded-full bg-emerald-600 text-white shrink-0" aria-hidden>
-                            <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                            </svg>
+                  {showDataReasoningColumn && (
+                    <td className="px-2 py-1 text-gray-800 align-middle min-w-0">
+                      {validationByRowId && validationByRowId[item.row.id] ? (
+                        validationByRowId[item.row.id].valid ? (
+                          <div className="inline-flex items-center gap-1.5">
+                            <span className="flex items-center justify-center w-5 h-5 rounded-full bg-emerald-600 text-white shrink-0" aria-hidden>
+                              <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                              </svg>
+                            </span>
+                            <span className="text-gray-700">Success</span>
+                          </div>
+                        ) : (
+                          <span className="truncate block text-gray-700" title={validationByRowId[item.row.id].reasoning}>
+                            {validationByRowId[item.row.id].reasoning}
                           </span>
-                          <span className="text-gray-700">Success</span>
-                        </div>
+                        )
                       ) : (
-                        <span className="truncate block text-gray-700" title={validationByRowId[item.row.id].reasoning}>
-                          {validationByRowId[item.row.id].reasoning}
-                        </span>
-                      )
-                    ) : (
-                      <span className="text-gray-400">—</span>
-                    )}
-                  </td>
+                        <span className="text-gray-400">—</span>
+                      )}
+                    </td>
+                  )}
                   <td className="px-2 py-1 align-middle">
                     <div
                       className="relative inline-block"

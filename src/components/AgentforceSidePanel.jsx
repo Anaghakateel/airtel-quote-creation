@@ -9,8 +9,14 @@ const PANEL_DEFAULT_WIDTH = 411 // 3.5x (reduced by 0.5x from 4x)
 const CREATE_QUOTE_AGENT_MESSAGE = {
   id: 'create-quote-welcome',
   role: 'agent',
-  text: 'Hi! I am here to assist you to "Create a Quote". Please upload files of locations in CSV or XLSX files or PDF format, along with your requirement details',
+  text: 'Hi! I can assist you with that. You can upload the document directly. Would you like to proceed with uploading a document or another type of document?',
 }
+
+const UPLOAD_FORM_MESSAGE_ID = 'upload-doc-form'
+
+const PROCESSING_COMPLETE_TEXT = 'Your file is being processed, you will be notified once done, or you can check the status here'
+
+const VALIDATION_IN_PROGRESS_TEXT = 'Validation is in progress, you will be notified once done, or you can check the status here'
 
 const ANALYZING_STAGES = [
   'Working',
@@ -34,7 +40,7 @@ function interpretQuoteUtterance(utterance, actions) {
     /\bmatch\s+(all\s+)?products?\b/.test(t)
   ) {
     actions.matchAllProducts()
-    return { success: true, message: 'Match All Products has been started. The table will update when matching completes.' }
+    return { success: true, message: VALIDATION_IN_PROGRESS_TEXT }
   }
 
   if (/\bclear\s*filters?\b/.test(t) || /\breset\s*filters?\b/.test(t)) {
@@ -84,7 +90,7 @@ function interpretQuoteUtterance(utterance, actions) {
       return {
         success: true,
         message: `Attributes for ${data.productName}:`,
-        showAttributesForm: true,
+        showAttributesBulletList: true,
         productName: data.productName,
         attributes: data.attributes,
         preSelectedValues,
@@ -143,7 +149,32 @@ function interpretQuoteUtterance(utterance, actions) {
   return { success: false, message: 'I didn\'t understand that. Try "Match all products", "Matching of products", "Match products", "Show attributes of product (SD WAN)", "Filter by matching status Partial", "View by Requested Products", "Clear filters", or "Update postal code to 500032" (after selecting rows).' }
 }
 
-function AgentforceSidePanel({ open, onClose, onAnalysisComplete, initialRestoreSnapshot, onPanelStateChange, quoteActionsRef, activeNavTab }) {
+// Parse follow-up utterance after attributes were shown as bullets: e.g. "Managed SD Wan, On premises, Cisco Meraki"
+function interpretAttributeChange(text, context, actions) {
+  if (!text || !context || !actions?.applyBulkAttributes) return null
+  const { productName, attributes, preSelectedValues } = context
+  if (!attributes || !preSelectedValues) return null
+  const tNorm = text.toLowerCase().trim().replace(/-/g, ' ')
+  const newValues = { ...preSelectedValues }
+  let changed = false
+  for (const [attrName, options] of Object.entries(attributes)) {
+    const opts = Array.isArray(options) ? options : [options]
+    for (const opt of opts) {
+      const optStrNorm = String(opt).toLowerCase().replace(/-/g, ' ')
+      const match = tNorm.includes(optStrNorm) || (optStrNorm.includes('(') && tNorm.includes(optStrNorm.split('(')[0].trim()))
+      if (match) {
+        newValues[attrName] = opt
+        changed = true
+        break
+      }
+    }
+  }
+  if (!changed) return null
+  const result = actions.applyBulkAttributes(productName, newValues, true)
+  return { success: true, message: result?.message ?? 'Attributes updated successfully.' }
+}
+
+function AgentforceSidePanel({ open, onClose, onAnalysisComplete, onNavigateToQuote, onNavigateToUpdatedQuote, onAttributesUpdated, onNavigateToQuoteView, initialRestoreSnapshot, onPanelStateChange, quoteActionsRef, activeNavTab }) {
   const [panelWidth, setPanelWidth] = useState(PANEL_DEFAULT_WIDTH)
   const [isPinned, setIsPinned] = useState(false)
   const [isConversationView, setIsConversationView] = useState(false)
@@ -153,12 +184,22 @@ function AgentforceSidePanel({ open, onClose, onAnalysisComplete, initialRestore
   const [attributesFormValuesByMessageId, setAttributesFormValuesByMessageId] = useState({})
   const chatEndRef = useRef(null)
   const fileInputRef = useRef(null)
+  const uploadFormFileInputRef = useRef(null)
+  const [uploadFormFile, setUploadFormFile] = useState(null) // file selected in the in-chat "Upload Files" form
   const analyzingIntervalRef = useRef(null)
   const dragRef = useRef({ startX: 0, startWidth: 0 })
   const hasAppliedRestoreRef = useRef(false)
 
   const scrollToBottom = () => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   useEffect(() => { if (messages.length) scrollToBottom() }, [messages.length])
+
+  // When opening from Quote page with a snapshot, show it immediately (before useEffect) to avoid welcome-screen flash
+  const effectiveMessages = open && initialRestoreSnapshot?.messages?.length && messages.length === 0
+    ? initialRestoreSnapshot.messages
+    : messages
+  const effectiveIsConversationView = open && initialRestoreSnapshot?.messages?.length && messages.length === 0
+    ? !!initialRestoreSnapshot.isConversationView
+    : isConversationView
 
   // Reset restore flag when panel closes so next open can apply snapshot again (e.g. open from Quote page)
   useEffect(() => {
@@ -196,14 +237,73 @@ function AgentforceSidePanel({ open, onClose, onAnalysisComplete, initialRestore
     setHasNotification(false)
   }
 
+  // Detect "Yes" / proceed (after PO upload question) – show upload form in chat
+  const isYesIntent = (t) => {
+    const s = (t || '').toLowerCase().trim()
+    return /^\s*(yes|yeah|yep|sure|ok|okay|proceed|please|i would|i\'d like)\s*\.?!?\s*$/i.test(s) || s === 'yes' || s === 'yeah' || s === 'sure' || s === 'proceed'
+  }
+
+  // Detect if user is asking to create a quote (from welcome screen) – same outcome as clicking "Create a quote" button
+  const isCreateQuoteIntent = (t) => {
+    const s = (t || '').toLowerCase().trim()
+    return (
+      /\bcreate\s*(a)?\s*quote\b/.test(s) ||
+      /\bcreating\s*(a)?\s*quote\b/.test(s) ||
+      /\bquote\s*creation\b/.test(s) ||
+      /\bwant\s+to\s+create\s*(a)?\s*quote\b/.test(s) ||
+      /\bwould\s+like\s+to\s+create\s*(a)?\s*quote\b/.test(s) ||
+      /\bhelp\s+me\s+create\s*(a)?\s*quote\b/.test(s) ||
+      /\bi\s+want\s+(a)?\s*quote\b/.test(s) ||
+      s === 'create quote' || s === 'creating a quote' || s === 'create a quote'
+    )
+  }
+
   const sendChatMessage = () => {
     const text = (chatInput || '').trim()
     if (!text) return
     setChatInput('')
+
+    // From welcome screen: any utterance (or "Create a quote" button) → show assist/upload prompt, then same flow
+    if (!isConversationView) {
+      setIsConversationView(true)
+      setMessages([
+        { id: `user-${Date.now()}`, role: 'user', text },
+        CREATE_QUOTE_AGENT_MESSAGE,
+      ])
+      return
+    }
+
+    // After "Would you like to proceed with uploading a PO document?" → user says Yes → show upload form in chat
+    const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null
+    if (lastMsg?.id === CREATE_QUOTE_AGENT_MESSAGE.id && isYesIntent(text)) {
+      setMessages((prev) => [
+        ...prev,
+        { id: `user-${Date.now()}`, role: 'user', text },
+        { id: UPLOAD_FORM_MESSAGE_ID, role: 'agent', text: 'Upload document', showUploadForm: true },
+      ])
+      return
+    }
+
     setMessages((prev) => [...prev, { id: `user-${Date.now()}`, role: 'user', text }])
     if (!isConversationView) setIsConversationView(true)
 
     const actions = activeNavTab === 'Quote' && quoteActionsRef?.current ? quoteActionsRef.current : null
+    const lastAgentMsg = [...messages].reverse().find((m) => m.role === 'agent' && (m.attributesForm || m.showAttributesBulletList))
+    const attributesContext = lastAgentMsg?.attributesForm || (lastAgentMsg?.showAttributesBulletList && lastAgentMsg?.productName ? { productName: lastAgentMsg.productName, attributes: lastAgentMsg.attributes, preSelectedValues: lastAgentMsg.preSelectedValues } : null)
+    const attributeResult = attributesContext ? interpretAttributeChange(text, attributesContext, actions) : null
+    if (attributeResult?.success) {
+      const productName = attributesContext.productName
+      onAttributesUpdated?.()
+      setMessages((prev) => [...prev, {
+        id: `agent-${Date.now()}`,
+        role: 'agent',
+        text: `Changes for required product ${productName} have been successfully incorporated.`,
+        showAttributesSuccessLink: true,
+        productName,
+      }])
+      return
+    }
+
     const result = interpretQuoteUtterance(text, actions)
     const agentId = `agent-${Date.now()}`
     const newMsg = {
@@ -217,8 +317,57 @@ function AgentforceSidePanel({ open, onClose, onAnalysisComplete, initialRestore
           preSelectedValues: result.preSelectedValues,
         },
       }),
+      ...(result.showAttributesBulletList && {
+        showAttributesBulletList: true,
+        productName: result.productName,
+        attributes: result.attributes,
+        preSelectedValues: result.preSelectedValues,
+        attributesForm: {
+          productName: result.productName,
+          attributes: result.attributes,
+          preSelectedValues: result.preSelectedValues,
+        },
+      }),
     }
     setMessages((prev) => [...prev, newMsg])
+  }
+
+  // Run analysis after in-chat "Upload Files" + "Submit" (adds "Uploaded document (name)" then analyzing stages)
+  const runAnalysisAfterUpload = (displayName) => {
+    setUploadFormFile(null)
+    if (uploadFormFileInputRef.current) uploadFormFileInputRef.current.value = ''
+    setMessages((prev) => [
+      ...prev,
+      { id: `upload-${Date.now()}`, role: 'user', text: `Uploaded document (${displayName})` },
+    ])
+    if (analyzingIntervalRef.current) clearInterval(analyzingIntervalRef.current)
+    setTimeout(() => {
+      setMessages((prev) => [
+        ...prev,
+        { id: `analyzing-${Date.now()}`, role: 'agent', text: ANALYZING_STAGES[0], isAnalyzing: true, analyzingStage: 0 },
+      ])
+      let step = 0
+      analyzingIntervalRef.current = setInterval(() => {
+        step += 1
+        if (step < ANALYZING_STAGES.length) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.isAnalyzing && m.analyzingStage !== undefined
+                ? { ...m, text: ANALYZING_STAGES[step], analyzingStage: step }
+                : m
+            )
+          )
+        } else {
+          if (analyzingIntervalRef.current) clearInterval(analyzingIntervalRef.current)
+          analyzingIntervalRef.current = null
+          setMessages((prev) =>
+            prev.map((m) => (m.isAnalyzing ? { ...m, isAnalyzing: false, text: PROCESSING_COMPLETE_TEXT } : m))
+          )
+          setHasNotification(true)
+          onAnalysisComplete?.()
+        }
+      }, 1500)
+    }, 1000)
   }
 
   const handleFileUpload = (e) => {
@@ -252,7 +401,7 @@ function AgentforceSidePanel({ open, onClose, onAnalysisComplete, initialRestore
           if (analyzingIntervalRef.current) clearInterval(analyzingIntervalRef.current)
           analyzingIntervalRef.current = null
           setMessages((prev) =>
-            prev.map((m) => (m.isAnalyzing ? { ...m, isAnalyzing: false, text: 'Extraction of Data is Complete' } : m))
+            prev.map((m) => (m.isAnalyzing ? { ...m, isAnalyzing: false, text: PROCESSING_COMPLETE_TEXT } : m))
           )
           setHasNotification(true)
           onAnalysisComplete?.()
@@ -360,7 +509,7 @@ function AgentforceSidePanel({ open, onClose, onAnalysisComplete, initialRestore
         </div>
 
         {/* Content: Welcome panel or Conversation panel */}
-        {!isConversationView ? (
+        {!effectiveIsConversationView ? (
           <div className="flex-1 min-h-0 overflow-y-auto pt-8 px-4 pb-4 flex flex-col items-center">
             <img
               src={agentforceIllustration}
@@ -404,14 +553,68 @@ function AgentforceSidePanel({ open, onClose, onAnalysisComplete, initialRestore
           <div className="flex-1 min-h-0 flex flex-col bg-white">
             {/* Conversation messages - scrollable, newest at bottom */}
             <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 flex flex-col justify-end gap-4">
-              {messages.map((msg) => (
+              {effectiveMessages.map((msg) => (
                 <div key={msg.id} className="flex gap-3 items-start">
                   {msg.role === 'agent' ? (
                     <>
                       <img src={agentforceIcon} alt="" className="w-9 h-9 rounded-full object-cover object-center shrink-0" />
                       <div className="flex-1 min-w-0">
-                        <p className="text-sm text-gray-800 whitespace-pre-line">{msg.text}</p>
-                        {msg.attributesForm && msg.attributesForm.attributes && (
+                        {msg.text === PROCESSING_COMPLETE_TEXT && onNavigateToQuote ? (
+                          <p className="text-sm text-gray-800 whitespace-pre-line">
+                            Your file is being processed, you will be notified once done, or you can check the status{' '}
+                            <button
+                              type="button"
+                              onClick={() => onNavigateToQuote()}
+                              className="text-blue-600 underline hover:text-blue-800 focus:outline-none focus:underline"
+                            >
+                              here
+                            </button>
+                          </p>
+                        ) : msg.text === VALIDATION_IN_PROGRESS_TEXT && onNavigateToUpdatedQuote ? (
+                          <p className="text-sm text-gray-800 whitespace-pre-line">
+                            Validation is in progress, you will be notified once done, or you can check the status{' '}
+                            <button
+                              type="button"
+                              onClick={() => onNavigateToUpdatedQuote()}
+                              className="text-blue-600 underline hover:text-blue-800 focus:outline-none focus:underline"
+                            >
+                              here
+                            </button>
+                          </p>
+                        ) : msg.showAttributesSuccessLink && msg.productName && onNavigateToQuoteView ? (
+                          <p className="text-sm text-gray-800 whitespace-pre-line">
+                            Changes for required product {msg.productName} have been successfully incorporated. Click{' '}
+                            <button
+                              type="button"
+                              onClick={() => onNavigateToQuoteView(msg.productName)}
+                              className="text-blue-600 underline hover:text-blue-800 focus:outline-none focus:underline"
+                            >
+                              here
+                            </button>
+                            {' '}to see it
+                          </p>
+                        ) : (
+                          <p className="text-sm text-gray-800 whitespace-pre-line">{msg.text}</p>
+                        )}
+                        {msg.showAttributesBulletList && msg.attributesForm && msg.attributesForm.attributes && (
+                          <div className="mt-3 p-3 rounded-lg border border-gray-200 bg-gray-50/80">
+                            <p className="text-xs font-semibold text-[#032d60] mb-2">Requested Product : {msg.attributesForm.productName}</p>
+                            <ul className="list-disc list-inside space-y-1.5 text-xs text-gray-800">
+                              {Object.entries(msg.attributesForm.attributes).map(([attrName, options]) => {
+                                const opts = Array.isArray(options) ? options : [options]
+                                const currentValue = msg.attributesForm.preSelectedValues[attrName] ?? opts[0]
+                                return (
+                                  <li key={attrName}>
+                                    <span className="font-medium">{attrName}:</span> {currentValue}
+                                    <span className="text-gray-500 ml-1">(options: {opts.join(', ')})</span>
+                                  </li>
+                                )
+                              })}
+                            </ul>
+                            <p className="text-xs text-gray-600 mt-2">Tell me which attributes you want to change, e.g. &quot;Change Service Type to Co-Managed&quot;.</p>
+                          </div>
+                        )}
+                        {msg.attributesForm && msg.attributesForm.attributes && !msg.showAttributesBulletList && (
                           <div className="mt-3 p-3 rounded-lg border border-gray-200 bg-gray-50/80">
                             <p className="text-xs font-semibold text-[#032d60] mb-3">Requested Product : {msg.attributesForm.productName}</p>
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -463,7 +666,64 @@ function AgentforceSidePanel({ open, onClose, onAnalysisComplete, initialRestore
                             ))}
                           </span>
                         )}
-                        {!msg.isAnalyzing && msg.id === CREATE_QUOTE_AGENT_MESSAGE.id && (
+                        {msg.showUploadForm && (
+                          <div className="mt-3 space-y-3">
+                            <p className="text-xs text-gray-700">* Upload PO Document</p>
+                            <input
+                              ref={uploadFormFileInputRef}
+                              type="file"
+                              accept=".pdf,.csv,.xlsx,application/pdf,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                              className="hidden"
+                              onChange={(e) => {
+                                const file = e.target.files?.[0]
+                                setUploadFormFile(file || null)
+                              }}
+                              aria-label="Upload PO document"
+                            />
+                            <div className="border-2 border-dashed border-gray-300 rounded-lg p-4 flex flex-wrap items-center gap-2 bg-gray-50/50">
+                              <button
+                                type="button"
+                                disabled={!!uploadFormFile}
+                                onClick={() => !uploadFormFile && uploadFormFileInputRef.current?.click()}
+                                className="px-4 py-2 rounded-lg border border-blue-600 bg-white text-blue-600 text-xs font-medium hover:bg-blue-50 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-white"
+                              >
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                                </svg>
+                                Upload Files
+                              </button>
+                              <span className="text-xs text-gray-500">Or drop files</span>
+                            </div>
+                            {uploadFormFile && (
+                              <div className="mt-3">
+                                <p className="text-xs font-semibold text-gray-800 mb-1">Uploaded Files:</p>
+                                <ul className="list-none text-xs text-gray-700 space-y-0.5">
+                                  <li className="flex items-center gap-1.5">
+                                    <span className="text-gray-500" aria-hidden="true">•</span>
+                                    {uploadFormFile.name || 'document'}
+                                  </li>
+                                </ul>
+                              </div>
+                            )}
+                            <button
+                              type="button"
+                              disabled={!uploadFormFile}
+                              onClick={() => uploadFormFile && runAnalysisAfterUpload(uploadFormFile.name || 'document')}
+                              className="px-4 py-2 rounded-full bg-blue-600 text-white text-xs font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              Submit
+                            </button>
+                            <div className="flex gap-2 mt-2">
+                              <button type="button" className="p-1 text-blue-600 hover:bg-blue-50 rounded" aria-label="Thumbs up">
+                                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M1 21h4V9H1v12zm22-11c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z"/></svg>
+                              </button>
+                              <button type="button" className="p-1 text-blue-600 hover:bg-blue-50 rounded" aria-label="Thumbs down">
+                                <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M15 3H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05c-.09.23-.14.47-.14.73v2c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73V5c0-1.1-.9-2-2-2zm4 0v12h4V3h-4z"/></svg>
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                        {!msg.isAnalyzing && msg.id === CREATE_QUOTE_AGENT_MESSAGE.id && !msg.showUploadForm && (
                           <div className="flex gap-2 mt-2">
                             <button type="button" className="p-1 text-blue-600 hover:bg-blue-50 rounded" aria-label="Thumbs up">
                               <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M1 21h4V9H1v12zm22-11c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-2z"/></svg>
@@ -493,7 +753,7 @@ function AgentforceSidePanel({ open, onClose, onAnalysisComplete, initialRestore
           </div>
         )}
 
-        {/* Input bar - larger box with "+" (upload PDF in conversation) and Voice icon */}
+        {/* Input bar - "+" hidden when in-chat upload form is shown (upload via "Upload Files" in chat only) */}
         <div className="shrink-0 p-4 bg-white border-t border-gray-200">
           <input
             ref={fileInputRef}
@@ -504,16 +764,6 @@ function AgentforceSidePanel({ open, onClose, onAnalysisComplete, initialRestore
             aria-label="Upload PDF"
           />
           <div className="flex items-end gap-2 rounded-lg border border-gray-300 bg-white pl-3 pr-2 py-3 min-h-[4.5rem]">
-            <button
-              type="button"
-              onClick={() => (isConversationView ? fileInputRef.current?.click() : null)}
-              className="w-9 h-9 rounded-full flex items-center justify-center text-gray-600 hover:bg-gray-100 focus:outline-none shrink-0 mb-0.5"
-              aria-label={isConversationView ? 'Upload PDF or file' : 'Add'}
-            >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-              </svg>
-            </button>
             <input
               type="text"
               value={chatInput}
