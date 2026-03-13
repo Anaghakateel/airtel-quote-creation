@@ -18,9 +18,13 @@ npm run build
 npm run preview   # preview production build
 ```
 
-## Deploy to Heroku
+## Deployment
 
-The project is set up for Heroku: it uses the **Node** buildpack, builds with Vite on deploy, and serves the static app with `serve`.
+The project is ready for deployment to **Heroku**, **Vercel**, or **Netlify**. Requires **Node 20.x** (`engines.node` in `package.json`).
+
+### Heroku
+
+The project uses the **Node** buildpack, builds with Vite on deploy, and serves the static app with `serve`.
 
 1. **Install the Heroku CLI** and log in: [https://devcenter.heroku.com/articles/heroku-cli](https://devcenter.heroku.com/articles/heroku-cli)
 
@@ -40,7 +44,21 @@ The project is set up for Heroku: it uses the **Node** buildpack, builds with Vi
 
 4. **Open the app**: `heroku open`
 
-Heroku will run `npm run build` (via `heroku-postbuild`) and then `npm start` (serves the `dist` folder with SPA fallback). Node version is set to **20.x** in `package.json` (`engines.node`).
+Heroku runs `npm run build` (via `heroku-postbuild`) and `npm start` (serves the `dist` folder with SPA fallback).
+
+### Vercel
+
+1. Install the [Vercel CLI](https://vercel.com/cli) and run `vercel` from the project root.
+2. Or connect your GitHub repo at [vercel.com](https://vercel.com); Vercel auto-detects Vite.
+
+The `vercel.json` config defines the build and SPA rewrites.
+
+### Netlify
+
+1. Install the [Netlify CLI](https://docs.netlify.com/cli/get-started/) and run `netlify deploy --prod` from the project root.
+2. Or connect your GitHub repo at [netlify.com](https://netlify.com).
+
+The `netlify.toml` config sets the build command and publish directory.
 
 ## What’s included (UI only)
 
