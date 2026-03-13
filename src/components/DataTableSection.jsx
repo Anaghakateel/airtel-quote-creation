@@ -49,7 +49,23 @@ function buildUniqueAddresses() {
 }
 const UNIQUE_LOCATION_ADDRESSES = buildUniqueAddresses()
 
-const REQUESTED_PRODUCTS = ['MPLS', 'SD WAN', 'Internet']
+// Matched products are the three standardized types: SD WAN, MPLS, Internet (and their specific offerings).
+// Requested products are customer wording from enterprise quote requests; they map to one of these three categories.
+const MATCHED_PRODUCT_CATEGORIES = ['SD WAN', 'MPLS', 'Internet']
+
+const REQUESTED_PRODUCT_TO_CATEGORY = {
+  'SD WAN': 'SD WAN', SDWAN: 'SD WAN', 'Software-defined WAN': 'SD WAN', 'WAN': 'SD WAN', 'SD-WAN': 'SD WAN',
+  MPLS: 'MPLS', 'MPLS VPN': 'MPLS', 'Private line': 'MPLS', 'Layer 2': 'MPLS', 'Layer 3': 'MPLS',
+  Internet: 'Internet', 'Leased line': 'Internet', Broadband: 'Internet', 'Dedicated Internet': 'Internet', 'Internet Leased Line': 'Internet', Connectivity: 'Internet',
+}
+const REQUESTED_PRODUCT_TERMS = Object.keys(REQUESTED_PRODUCT_TO_CATEGORY)
+const REQUESTED_PRODUCTS = REQUESTED_PRODUCT_TERMS
+
+function getCategoryForRequestedProduct(term) {
+  if (!term) return MATCHED_PRODUCT_CATEGORIES[0]
+  const category = REQUESTED_PRODUCT_TO_CATEGORY[term]
+  return category ?? MATCHED_PRODUCT_CATEGORIES[0]
+}
 
 const CONFIDENCE_LEVEL_OPTIONS = [
   { value: 'below30', label: 'Below 30%', min: 0, max: 29 },
@@ -65,13 +81,21 @@ const OTHER_FIELDS = {
   technology: ['Copper', 'Fiber'],
 }
 
-// Matched product options per requested product (for "Match All Products")
+// Matched product is always one of the three categories based on requested product
 const MATCHED_PRODUCTS_OPTIONS = {
-  'SD WAN': ['Managed SD-WAN', 'SD-WAN Branch', 'SD-WAN Lite'],
-  Internet: ['Internet Leased Line', 'Dedicated Internet', 'Business Broadband'],
-  MPLS: ['MPLS VPN', 'Global MPLS', 'VPN'],
+  'SD WAN': ['SD WAN'],
+  Internet: ['Internet'],
+  MPLS: ['MPLS'],
 }
 const MATCHING_STATUSES = ['Done', 'Partial', 'Pending']
+
+const UNMATCHED_ERROR_REASONS = [
+  'Product not available',
+  'Confidence below threshold',
+  'Invalid product combination',
+  'Technology not available at location',
+  'Postal code out of service area',
+]
 
 // When user edits Matched Products: Partial → Done or Pending; Pending → Partial or Done; Done → Partial or Pending
 function getNextMatchingStatus(currentStatus) {
@@ -117,12 +141,20 @@ const PRODUCT_ATTRIBUTES = {
   },
 }
 
+// Actual product-style asset names for the Asset Name column (not just category labels)
+const ASSET_NAMES = {
+  'SD WAN': ['SD-WAN Managed Service', 'Software-Defined WAN', 'SD-WAN Hybrid', 'Airtel SD-WAN Connect', 'Enterprise SD-WAN'],
+  MPLS: ['MPLS VPN', 'Private Line MPLS', 'Layer 2 VPN', 'Layer 3 IP VPN', 'MPLS Connectivity'],
+  Internet: ['Dedicated Internet Access', 'Internet Leased Line', 'Broadband Connectivity', 'Enterprise Internet', 'DIA', '4G Infra', 'Account Commitment'],
+}
+
 function pick(arr) {
   return arr[Math.floor(Math.random() * arr.length)]
 }
 
 function getAttributesForProduct(requestedProduct) {
-  const attrs = PRODUCT_ATTRIBUTES[requestedProduct]
+  const category = getCategoryForRequestedProduct(requestedProduct)
+  const attrs = PRODUCT_ATTRIBUTES[category]
   if (!attrs) return '—'
   const values = []
   for (const key of Object.keys(attrs)) {
@@ -133,7 +165,8 @@ function getAttributesForProduct(requestedProduct) {
 
 // Parse row.attributes string (e.g. "2 Mbps, Transport over IP, Layer 2 (VPLS)") into { attrName: value } by product key order
 function parseAttributesToObject(attributesString, requestedProduct) {
-  const attrs = PRODUCT_ATTRIBUTES[requestedProduct]
+  const category = getCategoryForRequestedProduct(requestedProduct)
+  const attrs = PRODUCT_ATTRIBUTES[category]
   if (!attrs) return {}
   const keys = Object.keys(attrs)
   if (!attributesString || attributesString === '—') {
@@ -149,13 +182,38 @@ function parseAttributesToObject(attributesString, requestedProduct) {
 
 // Format { attrName: value } back to display string in key order
 function formatAttributesFromObject(obj, requestedProduct) {
-  const attrs = PRODUCT_ATTRIBUTES[requestedProduct]
+  const category = getCategoryForRequestedProduct(requestedProduct)
+  const attrs = PRODUCT_ATTRIBUTES[category]
   if (!attrs) return '—'
   const values = Object.keys(attrs).map((k) => obj[k] ?? attrs[k][0] ?? '')
   return values.join(', ')
 }
 
+// Return attribute values different from oldAttributes (for MACD New Attributes column).
+// Deterministic: same (oldAttributes, requestedProduct) always yields same result, so values don't fluctuate on re-render.
+function getDifferentAttributesForProduct(oldAttributes, requestedProduct) {
+  const category = getCategoryForRequestedProduct(requestedProduct)
+  const attrs = PRODUCT_ATTRIBUTES[category]
+  if (!attrs) return '—'
+  const oldObj = parseAttributesToObject(oldAttributes, requestedProduct)
+  const newObj = {}
+  for (const key of Object.keys(attrs)) {
+    const options = attrs[key]
+    const current = oldObj[key]
+    const idx = options.indexOf(current)
+    // Pick next option cyclically (deterministic, different from current when 2+ options exist)
+    const nextIdx = options.length > 1 ? (idx + 1) % options.length : 0
+    newObj[key] = options[nextIdx] ?? current
+  }
+  return formatAttributesFromObject(newObj, requestedProduct)
+}
+
+function randomLsi() {
+  return '8000' + String(Math.floor(10000000000 + Math.random() * 9000000000)).slice(-11)
+}
+
 function createRow(id, streetAddress, requestedProduct) {
+  const attrs = getAttributesForProduct(requestedProduct)
   return {
     id,
     streetAddress,
@@ -164,7 +222,10 @@ function createRow(id, streetAddress, requestedProduct) {
     matchedProducts: '',
     matchingStatus: '',
     technology: pick(OTHER_FIELDS.technology),
-    attributes: getAttributesForProduct(requestedProduct),
+    attributes: attrs,
+    assetName: pick(ASSET_NAMES[getCategoryForRequestedProduct(requestedProduct)] ?? ASSET_NAMES['SD WAN']),
+    lsi: randomLsi(),
+    newAttributes: '',
     confidenceLevel: 40 + Math.floor(Math.random() * 59), // 40% to 98%
   }
 }
@@ -178,28 +239,32 @@ function shuffleArray(arr) {
   return a
 }
 
+function termsForCategory(category) {
+  return REQUESTED_PRODUCT_TERMS.filter((t) => getCategoryForRequestedProduct(t) === category)
+}
+
 function buildAllRows() {
   const rows = []
   let id = 1
 
-  // 1000 locations × 3 requested products each (MPLS, SD WAN, Internet) = 3000 records
+  // 1000 locations × 3 requested products (one per category: SD WAN, MPLS, Internet) = 3000 records; use varied customer terms
   for (let i = 0; i < 1000; i++) {
     const address = UNIQUE_LOCATION_ADDRESSES[i]
-    for (const product of REQUESTED_PRODUCTS) {
-      rows.push(createRow(id++, address, product))
-    }
+    rows.push(createRow(id++, address, pick(termsForCategory('SD WAN'))))
+    rows.push(createRow(id++, address, pick(termsForCategory('MPLS'))))
+    rows.push(createRow(id++, address, pick(termsForCategory('Internet'))))
   }
-  // 500 locations × 2 requested products each (MPLS, SD WAN) = 1000 records
+  // 500 locations × 2 requested products (two different categories) = 1000 records
   for (let i = 0; i < 500; i++) {
     const address = UNIQUE_LOCATION_ADDRESSES[1000 + i]
-    rows.push(createRow(id++, address, 'MPLS'))
-    rows.push(createRow(id++, address, 'SD WAN'))
+    const cats = shuffleArray([...MATCHED_PRODUCT_CATEGORIES]).slice(0, 2)
+    rows.push(createRow(id++, address, pick(termsForCategory(cats[0]))))
+    rows.push(createRow(id++, address, pick(termsForCategory(cats[1]))))
   }
-  // 1000 locations × 1 requested product each = 1000 records. Total = 3000 + 1000 + 1000 = 5000 records
+  // 1000 locations × 1 requested product each = 1000 records. Total = 5000
   for (let i = 0; i < 1000; i++) {
     const address = UNIQUE_LOCATION_ADDRESSES[1500 + i]
-    const product = REQUESTED_PRODUCTS[Math.floor(Math.random() * REQUESTED_PRODUCTS.length)]
-    rows.push(createRow(id++, address, product))
+    rows.push(createRow(id++, address, pick(REQUESTED_PRODUCT_TERMS)))
   }
 
   // Shuffle so repeated locations appear mixed, not grouped
@@ -223,53 +288,67 @@ function StatusPill({ status }) {
   if (!status) return null
   const styles = {
     Done: 'bg-emerald-100 text-teal-700 border border-transparent',
-    Partial: 'bg-gray-50 text-gray-600 border border-gray-300',
+    Partial: 'bg-grey-bg text-gray-600 border border-gray-300',
     Pending: 'bg-amber-100 text-amber-800 border border-transparent',
   }
   return (
-    <span className={`inline-flex px-1.5 py-0.5 rounded-md text-xs font-medium border ${styles[status] || 'bg-gray-100 text-gray-600 border-gray-200'}`}>
+    <span className={`inline-flex px-1.5 py-0.5 rounded-md text-xs font-medium border ${styles[status] || 'bg-grey-bg text-gray-600 border-gray-200'}`}>
       {status}
     </span>
   )
 }
 
-// Scoped notification bar: success (blue), error (red), warning (yellow). Optional message overrides default. Optional onDismiss shows close icon.
+// Scoped notification bar: info (grey), success (green), warning (orange), error (red). Optional message overrides default. Optional onDismiss shows close icon.
 function ScopedNotificationBar({ variant = 'success', locationsCount, productsCount, message: messageProp, onDismiss }) {
   const config = {
-    success: {
-      bg: 'bg-[#E4EDFC]',
+    info: {
+      bg: 'bg-gray-600',
       icon: (
-        <span className="flex items-center justify-center w-5 h-5 rounded-full bg-[#1976D2] text-white text-xs font-bold shrink-0">i</span>
+        <span className="flex items-center justify-center w-5 h-5 rounded-full bg-white text-gray-600 text-xs font-bold shrink-0">i</span>
       ),
-      textColor: 'text-[#1976D2]',
-      closeColor: 'text-[#1976D2] hover:bg-[#1976D2]/10',
+      textColor: 'text-white',
+      closeColor: 'text-white hover:bg-white/20',
     },
-    error: {
-      bg: 'bg-red-600',
+    success: {
+      bg: 'bg-green-600',
       icon: (
-        <svg className="w-4 h-4 text-white shrink-0" fill="currentColor" viewBox="0 0 24 24">
-          <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z" />
-        </svg>
+        <span className="flex items-center justify-center w-5 h-5 rounded-full bg-white text-green-600 shrink-0">
+          <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+          </svg>
+        </span>
       ),
       textColor: 'text-white',
       closeColor: 'text-white hover:bg-white/20',
     },
     warning: {
-      bg: 'bg-amber-400',
+      bg: 'bg-orange-500',
       icon: (
-        <svg className="w-4 h-4 text-amber-900 shrink-0" fill="currentColor" viewBox="0 0 24 24">
+        <svg className="w-5 h-5 text-black shrink-0" fill="currentColor" viewBox="0 0 24 24">
           <path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z" />
         </svg>
       ),
-      textColor: 'text-amber-900',
-      closeColor: 'text-amber-900 hover:bg-amber-900/10',
+      textColor: 'text-white',
+      closeColor: 'text-white hover:bg-white/20',
+    },
+    error: {
+      bg: 'bg-red-600',
+      icon: (
+        <span className="flex items-center justify-center w-5 h-5 rounded-full bg-white text-red-600 shrink-0">
+          <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </span>
+      ),
+      textColor: 'text-white',
+      closeColor: 'text-white hover:bg-white/20',
     },
   }
   const { bg, icon, textColor, closeColor } = config[variant] || config.success
   const message = messageProp ?? `${locationsCount} locations were successfully extracted and ${productsCount} requested products are successfully provided for each location based on the request.`
   return (
     <div className="px-4 pt-4 pb-2">
-      <div className={`flex items-center gap-3 px-4 py-2.5 rounded-xl ${bg}`} role="status">
+      <div className={`flex items-center gap-3 px-4 py-2.5 ${bg}`} role="status">
         <span className="flex items-center justify-center shrink-0" aria-hidden="true">
           {icon}
         </span>
@@ -297,6 +376,7 @@ function DataTableSection({
   validationResult: validationResultProp,
   onRecordCountChange,
   onValidationComplete,
+  onValidationStarted,
   onSelectionChange,
   onSelectedIdsChange,
   onLocationsData,
@@ -308,17 +388,24 @@ function DataTableSection({
   onDismissAttributesPrefilled,
   revealMatchedResultsInProgress = false,
   onRevealComplete,
+  hideMatchSummaryNotification = false,
+  onMatchedProductsEditComplete,
+  isMacdQuote = false,
 }) {
   const continuedRecordIds = continuedRecordIdsProp ?? new Set()
-  const [displayedCount, setDisplayedCount] = useState(10)
+  const PAGE_SIZE = 10
+  const [currentPage, setCurrentPage] = useState(1)
   const [notificationVariantState, setNotificationVariantState] = useState('success')
   const notificationVariant = notificationVariantProp ?? notificationVariantState // 'success' | 'error' | 'warning'
   const [scopedNotificationDismissed, setScopedNotificationDismissed] = useState(false)
+  const [showBulkAttributesMixedProductError, setShowBulkAttributesMixedProductError] = useState(false)
   const [attributesModalRow, setAttributesModalRow] = useState(null) // { rowId, product } when open
   const [attributesFormValues, setAttributesFormValues] = useState(null) // { [attrName]: value } for modal form
+  const [applyAttributesToSelectedRows, setApplyAttributesToSelectedRows] = useState(false) // "Update N selected items" in attributes modal
   const [openMenuRowId, setOpenMenuRowId] = useState(null)
   const [deletedIds, setDeletedIds] = useState(new Set())
   const [deleteModalRow, setDeleteModalRow] = useState(null)
+  const [applyDeleteToSelectedRows, setApplyDeleteToSelectedRows] = useState(false)
   const [viewByOpen, setViewByOpen] = useState(false)
   const [viewByValue, setViewByValue] = useState('All')
   const [viewBySortDirection, setViewBySortDirection] = useState('asc') // 'asc' | 'desc' – toggled when clicking the column sort icon
@@ -327,11 +414,11 @@ function DataTableSection({
   const [requestedProductFilter, setRequestedProductFilter] = useState(null) // null = All Products
   const [confidenceLevelFilter, setConfidenceLevelFilter] = useState(null) // null = All; or value from CONFIDENCE_LEVEL_OPTIONS
   const [matchedProductFilter, setMatchedProductFilter] = useState(null) // null = All Matched Products
-  const [matchingStatusFilter, setMatchingStatusFilter] = useState(null) // null = All; or 'Done' | 'Partial' | 'Pending'
+  const [mediaFilter, setMediaFilter] = useState(null) // null = All Media; or 'Copper' | 'Fiber'
   const [requestedProductDropdownOpen, setRequestedProductDropdownOpen] = useState(false)
   const [confidenceLevelDropdownOpen, setConfidenceLevelDropdownOpen] = useState(false)
   const [matchedProductDropdownOpen, setMatchedProductDropdownOpen] = useState(false)
-  const [matchingStatusDropdownOpen, setMatchingStatusDropdownOpen] = useState(false)
+  const [mediaDropdownOpen, setMediaDropdownOpen] = useState(false)
   const [searchInput, setSearchInput] = useState('')
   const [searchFilter, setSearchFilter] = useState(null) // applied when user clicks Search button
   const [showSearchSuggestions, setShowSearchSuggestions] = useState(false)
@@ -356,11 +443,17 @@ function DataTableSection({
   }
   const [editingCell, setEditingCell] = useState(null) // { rowId, column: 'technology' | 'requestedProducts' | 'postalCode' }
   const [cellEdits, setCellEdits] = useState(() => ({})) // { [rowId]: { technology?, requestedProducts?, postalCode? } }
-  const [matchResults, setMatchResults] = useState(() => ({})) // { [rowId]: { matchedProducts, matchingStatus, confidenceLevel? } } from "Match All Products"
+  const [matchResults, setMatchResults] = useState(() => ({})) // { [rowId]: { matchedProducts, matchingStatus, confidenceLevel?, errorDetails? } } from "Match All Products"
   const pendingMatchResultsRef = useRef({}) // filled after Match All completes; applied to matchResults when user clicks "Updated Quote Proposal"
+  const [matchSummaryNotification, setMatchSummaryNotification] = useState(null) // { matchedCount, unmatchedCount } after match; shown as orange warning
+  const [matchWarningDismissed, setMatchWarningDismissed] = useState(false)
+  const [viewUnmatchedOnly, setViewUnmatchedOnly] = useState(false)
   const [isMatchLoading, setIsMatchLoading] = useState(false)
-  const [rowsWithStatusChange, setRowsWithStatusChange] = useState(() => new Set()) // row IDs to show "Updated" badge
-  const statusChangeTimeoutsRef = useRef({})
+  const [lastUpdatedCells, setLastUpdatedCells] = useState(() => new Set()) // Set of 'rowId_column' – show UPDATED badge on these cells until next change
+  const cellKey = (rowId, col) => `${rowId}_${col}`
+  const UPDATED_BADGE = (
+    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold text-black bg-white border border-gray-300 shrink-0" title="Updated">Updated</span>
+  )
   const [applyPostalCodeToSelected, setApplyPostalCodeToSelected] = useState(true) // "Update N selected items" when bulk editing postal code
   const [postalCodePopoverPosition, setPostalCodePopoverPosition] = useState(null) // { top, left } for popover when bulk editing
   const postalCodeInputRef = useRef(null)
@@ -377,17 +470,34 @@ function DataTableSection({
   const searchAnchorRef = useRef(null)
   const selectAllCheckboxRef = useRef(null)
   const validationRowsRef = useRef([])
+  const macdNewAttributesCache = useRef({}) // Persist newAttributes per row so they don't fluctuate on re-render
 
   const dataRows = ALL_ROWS.filter(
     (r) => !deletedIds.has(r.id) && !(continuedRecordIds && continuedRecordIds.has(r.id))
   )
   const effectiveMatchResults = showMatchedResults ? matchResults : {}
-  const dataRowsWithEdits = dataRows.map((row) => ({ ...row, ...cellEdits[row.id], ...effectiveMatchResults[row.id] }))
+  const dataRowsWithEdits = dataRows.map((row) => {
+    const merged = { ...row, ...cellEdits[row.id], ...effectiveMatchResults[row.id] }
+    if (isMacdQuote) {
+      if (!merged.matchedProducts) {
+        merged.matchedProducts = MATCHED_PRODUCTS_OPTIONS[getCategoryForRequestedProduct(merged.requestedProducts)]?.[0] ?? getCategoryForRequestedProduct(merged.requestedProducts)
+        merged.matchingStatus = 'Done'
+      }
+      if (!merged.newAttributes || merged.newAttributes === '') {
+        const cacheKey = `${row.id}`
+        if (!macdNewAttributesCache.current[cacheKey]) {
+          macdNewAttributesCache.current[cacheKey] = getDifferentAttributesForProduct(merged.attributes, merged.requestedProducts)
+        }
+        merged.newAttributes = macdNewAttributesCache.current[cacheKey]
+      }
+    }
+    return merged
+  })
 
   // All matched product options for filter dropdown (flatten MATCHED_PRODUCTS_OPTIONS)
   const ALL_MATCHED_PRODUCT_OPTIONS = Object.values(MATCHED_PRODUCTS_OPTIONS).flat()
 
-  // Apply Requested Products, Confidence Level, Matched Products, and Matching Status filters
+  // Apply Requested Products, Confidence Level, Matched Products, and Media filters
   const filteredRows = dataRowsWithEdits.filter((row) => {
     if (requestedProductFilter != null && row.requestedProducts !== requestedProductFilter) return false
     if (confidenceLevelFilter != null) {
@@ -395,7 +505,7 @@ function DataTableSection({
       if (opt && (row.confidenceLevel < opt.min || row.confidenceLevel > opt.max)) return false
     }
     if (matchedProductFilter != null && row.matchedProducts !== matchedProductFilter) return false
-    if (matchingStatusFilter != null && row.matchingStatus !== matchingStatusFilter) return false
+    if (mediaFilter != null && row.technology !== mediaFilter) return false
     return true
   })
 
@@ -457,7 +567,7 @@ function DataTableSection({
       )
     }
     if (viewByValue === 'All') return searchFilteredRows
-    if (viewByValue === 'Technology') {
+    if (viewByValue === 'Media') {
       const order = viewBySortDirection === 'asc' ? ['Copper', 'Fiber'] : ['Fiber', 'Copper']
       return copy.sort((a, b) => {
         const i = order.indexOf(a.technology)
@@ -466,11 +576,14 @@ function DataTableSection({
       })
     }
     if (viewByValue === 'Requested Products') {
-      const order = viewBySortDirection === 'asc' ? ['MPLS', 'SD WAN', 'Internet'] : ['Internet', 'SD WAN', 'MPLS']
+      const categoryOrder = viewBySortDirection === 'asc' ? ['MPLS', 'SD WAN', 'Internet'] : ['Internet', 'SD WAN', 'MPLS']
       return copy.sort((a, b) => {
-        const i = order.indexOf(a.requestedProducts)
-        const j = order.indexOf(b.requestedProducts)
-        return (i === -1 ? order.length : i) - (j === -1 ? order.length : j) || 0
+        const catA = getCategoryForRequestedProduct(a.requestedProducts)
+        const catB = getCategoryForRequestedProduct(b.requestedProducts)
+        const i = categoryOrder.indexOf(catA)
+        const j = categoryOrder.indexOf(catB)
+        if (i !== j) return (i === -1 ? categoryOrder.length : i) - (j === -1 ? categoryOrder.length : j)
+        return (a.requestedProducts || '').localeCompare(b.requestedProducts || '')
       })
     }
     return searchFilteredRows
@@ -478,7 +591,7 @@ function DataTableSection({
 
   validationRowsRef.current = groupedRows
 
-  // When "View Selected" is on, show only selected rows; when validation filter is on, show only invalid or only valid rows
+  // When "View Selected" is on, show only selected rows; when validation filter is on, show only invalid or only valid rows; when "View Unmatched" is on, show only unmatched
   let rowsToDisplay = viewSelectedOnly
     ? groupedRows.filter((r) => selectedRowIds.has(r.id))
     : groupedRows
@@ -488,23 +601,30 @@ function DataTableSection({
   if (viewValidOnly && validationByRowId) {
     rowsToDisplay = rowsToDisplay.filter((r) => validationByRowId[r.id] && validationByRowId[r.id].valid)
   }
-  const visibleRows = viewSelectedOnly ? rowsToDisplay : rowsToDisplay.slice(0, displayedCount)
-  const hasMore = !viewSelectedOnly && displayedCount < groupedRows.length
+  if (viewUnmatchedOnly) {
+    rowsToDisplay = rowsToDisplay.filter((r) => r.matchingStatus === 'Partial' || r.matchingStatus === 'Pending')
+  }
+  const totalRows = rowsToDisplay.length
+  const totalPages = Math.max(1, Math.ceil(totalRows / PAGE_SIZE))
+  const visibleRows = viewSelectedOnly ? rowsToDisplay : rowsToDisplay.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE)
+  const hasPagination = !viewSelectedOnly && totalRows > PAGE_SIZE
+  // When viewing a subset (unmatched, selected, valid-only, invalid-only), tab and status line show this count
+  const effectiveRecordCount = (viewSelectedOnly || viewUnmatchedOnly || (viewInvalidOnly && validationByRowId) || (viewValidOnly && validationByRowId)) ? totalRows : searchFilteredRows.length
 
   // Extra status line text for filtering, grouping, or search
   const statusExtras = (() => {
     const parts = []
     const rows = searchFilteredRows
-    if (viewByValue === 'Technology' && confidenceSortDirection == null) {
+    if (viewByValue === 'Media' && confidenceSortDirection == null) {
       const copper = rows.filter((r) => r.technology === 'Copper').length
       const fiber = rows.filter((r) => r.technology === 'Fiber').length
       if (copper > 0) parts.push(`Shows ${copper} of Copper Technology`)
       if (fiber > 0) parts.push(`Shows ${fiber} of Fiber Technology`)
     }
     if (viewByValue === 'Requested Products' && confidenceSortDirection == null && requestedProductFilter == null) {
-      const mpls = rows.filter((r) => r.requestedProducts === 'MPLS').length
-      const sdwan = rows.filter((r) => r.requestedProducts === 'SD WAN').length
-      const internet = rows.filter((r) => r.requestedProducts === 'Internet').length
+      const mpls = rows.filter((r) => getCategoryForRequestedProduct(r.requestedProducts) === 'MPLS').length
+      const sdwan = rows.filter((r) => getCategoryForRequestedProduct(r.requestedProducts) === 'SD WAN').length
+      const internet = rows.filter((r) => getCategoryForRequestedProduct(r.requestedProducts) === 'Internet').length
       if (mpls > 0) parts.push(`Shows ${mpls} MPLS products`)
       if (sdwan > 0) parts.push(`Shows ${sdwan} SD WAN products`)
       if (internet > 0) parts.push(`Shows ${internet} Internet products`)
@@ -520,8 +640,8 @@ function DataTableSection({
     if (matchedProductFilter != null) {
       parts.push(`Shows ${rows.length} ${matchedProductFilter}`)
     }
-    if (matchingStatusFilter != null) {
-      parts.push(`Shows ${rows.length} ${matchingStatusFilter} status`)
+    if (mediaFilter != null) {
+      parts.push(`Shows ${rows.length} ${mediaFilter}`)
     }
     if (searchFilter != null && String(searchFilter).trim() !== '') {
       parts.push(`Shows ${rows.length} matching search`)
@@ -529,13 +649,12 @@ function DataTableSection({
     return parts
   })()
 
-  // When grouped by Technology or Requested Products (and not sorting by Confidence), insert section header rows
-  const TABLE_COLUMN_COUNT = 11
-  const showDataReasoningColumn = validationResult != null
-  const effectiveColumnCount = showDataReasoningColumn ? TABLE_COLUMN_COUNT : TABLE_COLUMN_COUNT - 1
+  // When grouped by Media or Requested Products (and not sorting by Confidence), insert section header rows
+  const TABLE_COLUMN_COUNT = isMacdQuote ? 13 : 10
+  const effectiveColumnCount = TABLE_COLUMN_COUNT
   const tbodyItems = (() => {
     if (viewByValue === 'All' || confidenceSortDirection != null) return visibleRows.map((row) => ({ type: 'row', row }))
-    const key = viewByValue === 'Technology' ? 'technology' : 'requestedProducts'
+    const key = viewByValue === 'Media' ? 'technology' : 'requestedProducts'
     const items = []
     let lastGroup = null
     for (const row of visibleRows) {
@@ -550,8 +669,8 @@ function DataTableSection({
   })()
 
   useEffect(() => {
-    onRecordCountChange?.(searchFilteredRows.length)
-  }, [searchFilteredRows.length, onRecordCountChange])
+    onRecordCountChange?.(effectiveRecordCount)
+  }, [effectiveRecordCount, onRecordCountChange])
 
   useEffect(() => {
     onSelectionChange?.(selectedRowIds.size)
@@ -561,11 +680,13 @@ function DataTableSection({
     onSelectedIdsChange?.(selectedRowIds)
   }, [selectedRowIds, onSelectedIdsChange])
 
-  // Unique locations (one per streetAddress) for Locations tab
+  // Unique locations (one per streetAddress) for Locations tab; source = "AI Extracted" | "File Uploaded", circle = e.g. "DL", "UW"
+  const CIRCLE_CODES = ['DL', 'UW', 'DL', 'MH', 'KA', 'TN', 'AP', 'GJ', 'WB', 'UP', 'RJ', 'PB']
   useEffect(() => {
     if (!onLocationsData) return
     const seen = new Set()
     const list = []
+    let index = 0
     for (const row of dataRows) {
       if (!seen.has(row.streetAddress)) {
         seen.add(row.streetAddress)
@@ -577,7 +698,11 @@ function DataTableSection({
           city: parts[2] || '',
           state: parts[3] || '',
           country: parts[4] || 'India',
+          source: index % 2 === 0 ? 'AI Extracted' : 'File Uploaded',
+          circle: CIRCLE_CODES[index % CIRCLE_CODES.length],
+          productsAssigned: !!(row.requestedProducts || row.matchedProducts),
         })
+        index++
       }
     }
     onLocationsData(list)
@@ -652,7 +777,7 @@ function DataTableSection({
         setRequestedProductDropdownOpen(false)
         setConfidenceLevelDropdownOpen(false)
         setMatchedProductDropdownOpen(false)
-        setMatchingStatusDropdownOpen(false)
+        setMediaDropdownOpen(false)
       }
     }
     document.addEventListener('click', handleClickOutside)
@@ -676,29 +801,59 @@ function DataTableSection({
   const editingRowForBulk = isBulkEditColumn && editingCell?.rowId ? dataRowsWithEdits.find((r) => r.id === editingCell.rowId) : null
 
   const handleMatchAllProducts = () => {
-    onMatchValidationComplete?.()
+    const isRevealFromLink = revealMatchedResultsInProgress
+    if (!isRevealFromLink) onMatchValidationComplete?.()
     setTimeout(() => {
       const next = {}
       dataRows.forEach((row) => {
         const requested = cellEdits[row.id]?.requestedProducts ?? row.requestedProducts
-        const options = MATCHED_PRODUCTS_OPTIONS[requested]
+        const category = getCategoryForRequestedProduct(requested)
+        const options = MATCHED_PRODUCTS_OPTIONS[category]
         const matched = options ? pick(options) : ''
         const status = pick(MATCHING_STATUSES)
-        next[row.id] = { matchedProducts: matched, matchingStatus: status, confidenceLevel: getConfidenceLevelForMatchingStatus(status) }
+        const isUnmatched = status !== 'Done'
+        next[row.id] = {
+          matchedProducts: matched,
+          matchingStatus: status,
+          confidenceLevel: getConfidenceLevelForMatchingStatus(status),
+          ...(isUnmatched && { errorDetails: pick(UNMATCHED_ERROR_REASONS) }),
+        }
       })
-      pendingMatchResultsRef.current = next
+      if (isRevealFromLink) {
+        setMatchResults({ ...next })
+        let matchedCount = 0
+        let unmatchedCount = 0
+        Object.values(next).forEach((r) => {
+          if (r.matchingStatus === 'Done') matchedCount++
+          else unmatchedCount++
+        })
+        setMatchSummaryNotification({ matchedCount, unmatchedCount })
+        setMatchWarningDismissed(false)
+      } else {
+        pendingMatchResultsRef.current = next
+      }
     }, 2000)
   }
 
   useEffect(() => {
     if (showMatchedResults && Object.keys(pendingMatchResultsRef.current || {}).length > 0) {
-      setMatchResults({ ...pendingMatchResultsRef.current })
+      const pending = pendingMatchResultsRef.current
+      setMatchResults({ ...pending })
+      let matchedCount = 0
+      let unmatchedCount = 0
+      Object.values(pending).forEach((r) => {
+        if (r.matchingStatus === 'Done') matchedCount++
+        else unmatchedCount++
+      })
+      setMatchSummaryNotification({ matchedCount, unmatchedCount })
+      setMatchWarningDismissed(false)
+      pendingMatchResultsRef.current = {}
     }
   }, [showMatchedResults])
 
   useEffect(() => {
     if (!revealMatchedResultsInProgress || !onRevealComplete) return
-    const t = setTimeout(() => { onRevealComplete() }, 1000)
+    const t = setTimeout(() => { onRevealComplete() }, 2000)
     return () => clearTimeout(t)
   }, [revealMatchedResultsInProgress, onRevealComplete])
 
@@ -715,22 +870,26 @@ function DataTableSection({
     return true
   }
 
-  const applyBulkAttributes = (productName, attributesObject, applyToAllRowsWithProduct = false) => {
-    if (!attributesObject || !PRODUCT_ATTRIBUTES[productName]) return { applied: 0, message: 'Invalid product or attributes.' }
+  const applyBulkAttributes = (productName, attributesObject, applyToAllRowsWithProduct = false, applyToSelectedRowsOnly = false) => {
+    const category = getCategoryForRequestedProduct(productName)
+    if (!attributesObject || !PRODUCT_ATTRIBUTES[category]) return { applied: 0, message: 'Invalid product or attributes.', updatedIds: [] }
     const str = formatAttributesFromObject(attributesObject, productName)
     const ids = applyToAllRowsWithProduct
       ? dataRows.filter((row) => (cellEdits[row.id]?.requestedProducts ?? row.requestedProducts) === productName).map((r) => r.id)
-      : Array.from(selectedRowIds).filter((id) => {
-          const row = dataRows.find((r) => r.id === id)
-          const requested = cellEdits[id]?.requestedProducts ?? row?.requestedProducts
-          return requested === productName
-        })
+      : applyToSelectedRowsOnly && selectedRowIds.size >= 2
+        ? Array.from(selectedRowIds)
+        : Array.from(selectedRowIds).filter((id) => {
+            const row = dataRows.find((r) => r.id === id)
+            const requested = cellEdits[id]?.requestedProducts ?? row?.requestedProducts
+            return requested === productName
+          })
     if (ids.length === 0) {
       return {
         applied: 0,
         message: applyToAllRowsWithProduct
           ? `No rows have Requested Product: ${productName}.`
           : `No selected rows have Requested Product: ${productName}. Select rows on the table first, then save attributes.`,
+        updatedIds: [],
       }
     }
     setCellEdits((prev) => { const next = { ...prev }; ids.forEach((id) => { next[id] = { ...next[id], attributes: str } }); return next })
@@ -738,21 +897,74 @@ function DataTableSection({
     return {
       applied: ids.length,
       message: `Successfully changed the attributes of ${productName}. ${ids.length} row(s) updated in the table.`,
+      updatedIds: ids,
     }
+  }
+
+  const applyAttributesByMatchedProductCategory = (category, attributesOverride) => {
+    const productName = category === 'SD WAN' ? termsForCategory('SD WAN')[0] : category === 'MPLS' ? termsForCategory('MPLS')[0] : termsForCategory('Internet')[0]
+    const attrs = PRODUCT_ATTRIBUTES[category]
+    if (!attrs || !attributesOverride) return []
+    const merged = {}
+    Object.keys(attrs).forEach((k) => { merged[k] = attributesOverride[k] ?? attrs[k][0] ?? '' })
+    const str = formatAttributesFromObject(merged, productName)
+    const ids = dataRows.filter((row) => getCategoryForRequestedProduct(cellEdits[row.id]?.requestedProducts ?? row.requestedProducts) === category).map((r) => r.id)
+    if (ids.length === 0) return []
+    setCellEdits((prev) => { const next = { ...prev }; ids.forEach((id) => { next[id] = { ...next[id], attributes: str } }); return next })
+    setMatchResults((prev) => { const next = { ...prev }; ids.forEach((id) => { next[id] = { ...next[id], attributes: str } }); return next })
+    return ids
+  }
+
+  const applyRequestedProductsByPostalCode = (postalCode, requestedProduct) => {
+    const pc = String(postalCode || '').trim()
+    if (!pc || !requestedProduct) return []
+    const ids = dataRows.filter((row) => (cellEdits[row.id]?.postalCode ?? row.postalCode) === pc).map((r) => r.id)
+    if (ids.length === 0) return []
+    setCellEdits((prev) => { const next = { ...prev }; ids.forEach((id) => { next[id] = { ...next[id], requestedProducts: requestedProduct } }); return next })
+    setMatchResults((prev) => {
+      const next = { ...prev }
+      const category = getCategoryForRequestedProduct(requestedProduct)
+      ids.forEach((id) => {
+        const row = dataRows.find((r) => r.id === id)
+        next[id] = { ...next[id], requestedProducts: requestedProduct, matchedProducts: MATCHED_PRODUCTS_OPTIONS[category]?.[0] ?? '', attributes: getAttributesForProduct(requestedProduct) }
+      })
+      return next
+    })
+    return ids
+  }
+
+  const applyUpdateFromIntent = (intentText) => {
+    if (!intentText || typeof intentText !== 'string') return []
+    const t = intentText.toLowerCase().trim()
+    let rowIds = []
+    if (/sd\s*wan|sdwan/.test(t) && (/attribute|co-?owned|co-?managed|managed/.test(t))) {
+      rowIds = applyAttributesByMatchedProductCategory('SD WAN', { 'Service Type': 'Co-Managed', 'SDWAN Deployment Type': 'Hybrid', 'SDWAN Controller Platform': 'Cisco Meraki (MX Series)' })
+      setMatchedProductFilter('SD WAN')
+    } else {
+      const pincodeMatch = t.match(/pincode\s*\(?(\d+)\)?|postal\s*code\s*\(?(\d+)\)?|pincode\s+(\d+)/i)
+      const toInternet = /\bto\s+internet\b/i.test(t)
+      if (pincodeMatch && toInternet) {
+        const postalCode = (pincodeMatch[1] || pincodeMatch[2] || pincodeMatch[3] || '').trim()
+        if (postalCode) rowIds = applyRequestedProductsByPostalCode(postalCode, 'Internet')
+      }
+    }
+    return rowIds
   }
 
   const runValidation = () => {
     setValidationInProgress(true)
+    onValidationStarted?.()
     setValidationNotificationDismissed(false)
     setViewInvalidOnly(false)
     setViewValidOnly(false)
     const rows = validationRowsRef.current || []
+    const passRate = isMacdQuote ? 0.82 : 0.8  // MACD: ~18% fail (error reasons for some rows); others: ~20% fail
     setTimeout(() => {
       const byRowId = {}
       const validatedRowIds = new Set()
       let validatedCount = 0
       for (const row of rows) {
-        const valid = Math.random() < 0.8
+        const valid = Math.random() < passRate
         if (valid) {
           validatedCount++
           validatedRowIds.add(row.id)
@@ -780,7 +992,7 @@ function DataTableSection({
       setRequestedProductFilter,
       setConfidenceLevelFilter,
       setMatchedProductFilter,
-      setMatchingStatusFilter,
+      setMediaFilter,
       setViewByValue,
       setSearchFilter,
       setViewSelectedOnly,
@@ -788,7 +1000,8 @@ function DataTableSection({
       applyBulkPostalCode,
       applyBulkAttributes,
       getProductAttributes: (productName) => {
-        const attrs = PRODUCT_ATTRIBUTES[productName]
+        const category = getCategoryForRequestedProduct(productName)
+        const attrs = PRODUCT_ATTRIBUTES[category]
         if (!attrs) return null
         return { productName, attributes: attrs }
       },
@@ -796,8 +1009,13 @@ function DataTableSection({
         setRequestedProductFilter(null)
         setConfidenceLevelFilter(null)
         setMatchedProductFilter(null)
-        setMatchingStatusFilter(null)
+        setMediaFilter(null)
       },
+      showUpdatedBadgeForRows: (rowIds) => {
+        if (!rowIds || !rowIds.length) return
+        setLastUpdatedCells(new Set(rowIds.map((id) => cellKey(id, 'matchedProducts'))))
+      },
+      applyUpdateFromIntent,
     }
     return () => { quoteActionsRef.current = {} }
   })
@@ -835,7 +1053,7 @@ function DataTableSection({
                 type="checkbox"
                 checked={applyPostalCodeToSelected}
                 onChange={(e) => setApplyPostalCodeToSelected(e.target.checked)}
-                className="rounded border-gray-300 text-blue-600 focus:ring-blue-500 w-3.5 h-3.5"
+                className="rounded border-gray-300 text-airtel-red focus:ring-airtel-red w-3.5 h-3.5"
               />
               <span className="text-xs text-gray-700">Update {selectedRowIds.size} selected items</span>
             </label>
@@ -843,7 +1061,7 @@ function DataTableSection({
               <button
                 type="button"
                 onClick={() => setEditingCell(null)}
-                className="px-3 py-1.5 text-xs font-medium border border-gray-300 rounded-md bg-white text-blue-600 hover:bg-gray-50"
+                className="px-3 py-1.5 text-xs font-medium border border-gray-300 rounded-md bg-white text-blue-600 hover:bg-grey-bg"
               >
                 Cancel
               </button>
@@ -851,17 +1069,18 @@ function DataTableSection({
                 type="button"
                 onClick={() => {
                   const v = (postalCodeInputRef.current?.value ?? '').trim() || editingRowForPostal.postalCode
+                  const ids = applyPostalCodeToSelected ? Array.from(selectedRowIds) : [editingCell.rowId]
                   setCellEdits((prev) => {
                     const next = { ...prev }
-                    const ids = applyPostalCodeToSelected ? Array.from(selectedRowIds) : [editingCell.rowId]
                     ids.forEach((id) => {
                       next[id] = { ...next[id], postalCode: v }
                     })
                     return next
                   })
+                  setLastUpdatedCells(new Set(ids.map((id) => cellKey(id, 'postalCode'))))
                   setEditingCell(null)
                 }}
-                className="px-3 py-1.5 text-xs font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1"
+                className="px-3 py-1.5 text-xs font-medium rounded-md bg-airtel-red text-white hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-airtel-red focus:ring-offset-1"
               >
                 Save
               </button>
@@ -886,7 +1105,7 @@ function DataTableSection({
               zIndex: 9999,
             }}
             role="dialog"
-            aria-label={`Bulk edit ${editingCell.column === 'requestedProducts' ? 'Requested Products' : editingCell.column === 'matchedProducts' ? 'Matched Products' : 'Technology'}`}
+            aria-label={`Bulk edit ${editingCell.column === 'requestedProducts' ? 'Requested Products' : editingCell.column === 'matchedProducts' ? 'Matched Products' : 'Media'}`}
           >
             {editingCell.column === 'requestedProducts' && (
               <select
@@ -902,10 +1121,10 @@ function DataTableSection({
             {editingCell.column === 'matchedProducts' && (
               <select
                 ref={bulkEditMatchedProductsRef}
-                defaultValue={editingRowForBulk.matchedProducts || (MATCHED_PRODUCTS_OPTIONS[editingRowForBulk.requestedProducts]?.[0] ?? '')}
+                defaultValue={editingRowForBulk.matchedProducts || (MATCHED_PRODUCTS_OPTIONS[getCategoryForRequestedProduct(editingRowForBulk.requestedProducts)]?.[0] ?? '')}
                 className="w-full px-2 py-1.5 text-xs border border-blue-600 rounded-md bg-white text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
               >
-                {(MATCHED_PRODUCTS_OPTIONS[editingRowForBulk.requestedProducts] || []).map((opt) => (
+                {ALL_MATCHED_PRODUCT_OPTIONS.map((opt) => (
                   <option key={opt} value={opt}>{opt}</option>
                 ))}
               </select>
@@ -926,7 +1145,7 @@ function DataTableSection({
                 type="checkbox"
                 checked={applyBulkEditToSelected}
                 onChange={(e) => setApplyBulkEditToSelected(e.target.checked)}
-                className="rounded border-gray-300 text-blue-600 focus:ring-blue-500 w-3.5 h-3.5"
+                className="rounded border-gray-300 text-airtel-red focus:ring-airtel-red w-3.5 h-3.5"
               />
               <span className="text-xs text-gray-700">Update {selectedRowIds.size} selected items</span>
             </label>
@@ -934,7 +1153,7 @@ function DataTableSection({
               <button
                 type="button"
                 onClick={() => setEditingCell(null)}
-                className="px-3 py-1.5 text-xs font-medium border border-gray-300 rounded-md bg-white text-blue-600 hover:bg-gray-50"
+                className="px-3 py-1.5 text-xs font-medium border border-gray-300 rounded-md bg-white text-blue-600 hover:bg-grey-bg"
               >
                 Cancel
               </button>
@@ -952,24 +1171,18 @@ function DataTableSection({
                   }
                   if (editingCell.column === 'matchedProducts') {
                     const v = bulkEditMatchedProductsRef.current?.value ?? editingRowForBulk.matchedProducts
+                    const attributesForMatched = getAttributesForProduct(v)
                     setMatchResults((prev) => {
                       const next = { ...prev }
                       ids.forEach((id) => {
                         const row = dataRowsWithEdits.find((r) => r.id === id)
                         const currentStatus = row?.matchingStatus || ''
                         const status = getNextMatchingStatus(currentStatus)
-                        next[id] = { ...prev[id], matchedProducts: v, matchingStatus: status, confidenceLevel: getConfidenceLevelForMatchingStatus(status), attributes: getAttributesForProduct(row?.requestedProducts ?? '') }
+                        next[id] = { ...prev[id], matchedProducts: v, matchingStatus: status, confidenceLevel: getConfidenceLevelForMatchingStatus(status), attributes: attributesForMatched }
                       })
                       return next
                     })
-                    setRowsWithStatusChange((prev) => { const n = new Set(prev); ids.forEach((id) => n.add(id)); return n })
-                    ids.forEach((id) => {
-                      if (statusChangeTimeoutsRef.current[id]) clearTimeout(statusChangeTimeoutsRef.current[id])
-                      statusChangeTimeoutsRef.current[id] = setTimeout(() => {
-                        setRowsWithStatusChange((p) => { const s = new Set(p); s.delete(id); return s })
-                        delete statusChangeTimeoutsRef.current[id]
-                      }, 3000)
-                    })
+                    onMatchedProductsEditComplete?.(ids)
                   }
                   if (editingCell.column === 'technology') {
                     const v = bulkEditTechnologyRef.current?.value ?? editingRowForBulk.technology
@@ -979,9 +1192,15 @@ function DataTableSection({
                       return next
                     })
                   }
+                  // Show Updated badge on all cells that were bulk-updated; for matchedProducts also show badge on attributes column (attributes update with product)
+                  if (editingCell.column === 'matchedProducts') {
+                    setLastUpdatedCells(new Set(ids.flatMap((id) => [cellKey(id, 'matchedProducts'), cellKey(id, 'attributes')])))
+                  } else {
+                    setLastUpdatedCells(new Set(ids.map((id) => cellKey(id, editingCell.column))))
+                  }
                   setEditingCell(null)
                 }}
-                className="px-3 py-1.5 text-xs font-medium rounded-md bg-blue-600 text-white hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1"
+                className="px-3 py-1.5 text-xs font-medium rounded-md bg-airtel-red text-white hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-airtel-red focus:ring-offset-1"
               >
                 Save
               </button>
@@ -991,7 +1210,7 @@ function DataTableSection({
         )
       : null
 
-  const attributesModalOpen = attributesModalRow != null && PRODUCT_ATTRIBUTES[attributesModalRow.product]
+  const attributesModalOpen = attributesModalRow != null && PRODUCT_ATTRIBUTES[getCategoryForRequestedProduct(attributesModalRow.product)]
 
   const attributesModal =
     attributesModalOpen && attributesModalRow && attributesFormValues
@@ -1001,7 +1220,7 @@ function DataTableSection({
             role="dialog"
             aria-modal="true"
             aria-labelledby="attributes-modal-title"
-            onClick={(e) => { if (e.target === e.currentTarget) { setAttributesModalRow(null); setAttributesFormValues(null) } }}
+            onClick={(e) => { if (e.target === e.currentTarget) { setAttributesModalRow(null); setAttributesFormValues(null); setApplyAttributesToSelectedRows(false) } }}
           >
             <div
               className="bg-white rounded-xl border border-gray-200 shadow-xl max-w-2xl w-full max-h-[90vh] overflow-hidden flex flex-col"
@@ -1012,7 +1231,7 @@ function DataTableSection({
               </h2>
               <div className="flex-1 overflow-y-auto px-5 py-4">
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                  {Object.keys(PRODUCT_ATTRIBUTES[attributesModalRow.product]).map((attrName) => (
+                  {Object.keys(PRODUCT_ATTRIBUTES[getCategoryForRequestedProduct(attributesModalRow.product)] || {}).map((attrName) => (
                     <div key={attrName}>
                       <label className="block text-xs font-semibold text-gray-700 mb-1">{attrName}</label>
                       <select
@@ -1023,7 +1242,7 @@ function DataTableSection({
                         className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg bg-white text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
                       >
                         <option value="">All Products</option>
-                        {(PRODUCT_ATTRIBUTES[attributesModalRow.product][attrName] || []).map((opt) => (
+                        {(PRODUCT_ATTRIBUTES[getCategoryForRequestedProduct(attributesModalRow.product)][attrName] || []).map((opt) => (
                           <option key={opt} value={opt}>{opt}</option>
                         ))}
                       </select>
@@ -1031,18 +1250,50 @@ function DataTableSection({
                   ))}
                 </div>
               </div>
-              <div className="shrink-0 border-t border-gray-200 px-5 py-4 flex justify-end">
+              {selectedRowIds.size >= 2 && (
+                <div className="shrink-0 px-5 py-2 border-t border-gray-100">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={applyAttributesToSelectedRows}
+                      onChange={(e) => setApplyAttributesToSelectedRows(e.target.checked)}
+                      className="rounded border-gray-300 text-airtel-red focus:ring-airtel-red"
+                    />
+                    <span className="text-sm text-gray-700">Update {selectedRowIds.size} selected items</span>
+                  </label>
+                </div>
+              )}
+              <div className="shrink-0 border-t border-gray-200 px-5 py-4 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAttributesModalRow(null)
+                    setAttributesFormValues(null)
+                    setApplyAttributesToSelectedRows(false)
+                  }}
+                  className="px-4 py-2 text-sm font-medium rounded-lg border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-gray-300 focus:ring-offset-1"
+                >
+                  Cancel
+                </button>
                 <button
                   type="button"
                   onClick={() => {
                     const str = formatAttributesFromObject(attributesFormValues, attributesModalRow.product)
                     const rowId = attributesModalRow.rowId
-                    setCellEdits((prev) => ({ ...prev, [rowId]: { ...prev[rowId], attributes: str } }))
-                    setMatchResults((prev) => ({ ...prev, [rowId]: { ...prev[rowId], attributes: str } }))
+                    let updatedIds = [rowId]
+                    if (applyAttributesToSelectedRows && selectedRowIds.size >= 2) {
+                      const result = applyBulkAttributes(attributesModalRow.product, attributesFormValues, false, true)
+                      updatedIds = result.updatedIds ?? []
+                    } else {
+                      setCellEdits((prev) => ({ ...prev, [rowId]: { ...prev[rowId], attributes: str } }))
+                      setMatchResults((prev) => ({ ...prev, [rowId]: { ...prev[rowId], attributes: str } }))
+                    }
+                    setLastUpdatedCells(new Set(updatedIds.map((id) => cellKey(id, 'attributes'))))
                     setAttributesModalRow(null)
                     setAttributesFormValues(null)
+                    setApplyAttributesToSelectedRows(false)
                   }}
-                  className="px-4 py-2 text-sm font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1"
+                  className="px-4 py-2 text-sm font-medium rounded-lg bg-airtel-red text-white hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-airtel-red focus:ring-offset-1"
                 >
                   Save
                 </button>
@@ -1054,9 +1305,22 @@ function DataTableSection({
       : null
 
   const openAttributesModal = (rowId, product, currentAttributesString) => {
-    if (!PRODUCT_ATTRIBUTES[product]) return
+    if (!PRODUCT_ATTRIBUTES[getCategoryForRequestedProduct(product)]) return
+    // Only block when selected rows have different product types (e.g. MPLS + SD WAN). Same product with different attribute values is allowed.
+    if (selectedRowIds.size >= 2) {
+      const selectedRows = dataRowsWithEdits.filter((r) => selectedRowIds.has(r.id))
+      const productTypes = new Set(
+        selectedRows.map((r) => getCategoryForRequestedProduct((r.requestedProducts ?? '').toString().trim()))
+      )
+      if (productTypes.size > 1) {
+        setShowBulkAttributesMixedProductError(true)
+        return
+      }
+    }
+    setShowBulkAttributesMixedProductError(false)
     setAttributesModalRow({ rowId, product })
     setAttributesFormValues(parseAttributesToObject(currentAttributesString, product))
+    setApplyAttributesToSelectedRows(false)
   }
 
   return (
@@ -1064,38 +1328,50 @@ function DataTableSection({
       {postalCodePopover}
       {bulkEditPopover}
       {attributesModal}
-      <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
-      {/* Scoped notification: validation result (same position as extraction notification) or extraction success */}
-      {validationResult != null && !validationNotificationDismissed ? (
+      {/* Screenshot area: one rectangle card (banner + toolbar + stats + table) – grey #F5F5F5 */}
+      <div className="bg-screenshot-grey rounded-lg border border-gray-200 shadow-sm overflow-hidden">
+      <div className="bg-screenshot-grey">
+      {/* Error: bulk edit attributes with mixed product types (e.g. SDWAN + MPLS) */}
+      {showBulkAttributesMixedProductError ? (
+        <ScopedNotificationBar
+          variant="error"
+          message="Unable to bulk edit. Your selection includes different products. To proceed, ensure all selected items are of the same product type."
+          onDismiss={() => setShowBulkAttributesMixedProductError(false)}
+        />
+      ) : validationResult != null && !validationNotificationDismissed ? (
         <div className="px-4 pt-4 pb-2">
-          <div className="flex items-center gap-3 px-4 py-2.5 rounded-xl bg-[#FDF1DB]" role="status">
+          <div className="flex items-center gap-3 px-4 py-2.5 bg-orange-500" role="status">
             <span className="flex items-center justify-center shrink-0" aria-hidden="true">
-              <svg className="w-5 h-5 text-amber-800 shrink-0" fill="currentColor" viewBox="0 0 24 24">
+              <svg className="w-5 h-5 text-black shrink-0" fill="currentColor" viewBox="0 0 24 24">
                 <path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z" />
               </svg>
             </span>
-            <p className="text-sm font-medium flex-1 min-w-0 text-amber-900">
-              {validationResult.validatedCount} records of {validationResult.totalCount} records are validated and is successful{' '}
+            <p className="text-sm font-medium flex-1 min-w-0 text-black">
+              {validationResult.validatedCount} of {validationResult.totalCount} records validated
+              {(validationResult.totalCount - validationResult.validatedCount) > 0 && (
+                <> · {validationResult.totalCount - validationResult.validatedCount} have errors</>
+              )}
+              {' '}
               <button
                 type="button"
                 onClick={() => { setViewValidOnly(true); setViewInvalidOnly(false) }}
-                className="underline text-amber-900 hover:text-amber-950 focus:outline-none"
+                className="underline text-black font-semibold hover:text-black/80 focus:outline-none"
               >
-                Show validated records
+                Show verified records
               </button>
               {' · '}
               <button
                 type="button"
-                onClick={() => { setViewInvalidOnly(true); setViewValidOnly(false) }}
-                className="underline text-amber-900 hover:text-amber-950 focus:outline-none"
+                onClick={() => { setViewInvalidOnly(true); setViewValidOnly(false); setCurrentPage(1) }}
+                className="underline text-black font-semibold hover:text-black/80 focus:outline-none"
               >
-                Show Invalid Records
+                Show unverified Records
               </button>
             </p>
             <button
               type="button"
               onClick={() => setValidationNotificationDismissed(true)}
-              className="shrink-0 p-1 rounded-full text-amber-900 hover:bg-amber-900/10 focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-current"
+              className="shrink-0 p-1 rounded-full text-black hover:bg-black/10 focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-current"
               aria-label="Close notification"
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1106,69 +1382,65 @@ function DataTableSection({
         </div>
       ) : showAttributesPrefilledNotification ? (
         <ScopedNotificationBar
-          variant="success"
+          variant="info"
           message="Attributes pre-filled based on 47 similar past orders for SDWAN/ HDFC Bank / 500089. Review and adjust as needed."
           onDismiss={onDismissAttributesPrefilled}
         />
       ) : !scopedNotificationDismissed ? (
         <ScopedNotificationBar
-          variant={notificationVariant}
+          variant="info"
           locationsCount={uniqueLocationsCount}
           productsCount={productsCount}
           onDismiss={() => setScopedNotificationDismissed(true)}
         />
       ) : null}
-      {/* Table toolbar */}
-      <div className="flex flex-col gap-3 p-4 border-b border-gray-200 bg-gray-50/50">
-        {/* Row 1: View By & Filter by (left) | Search group (right) */}
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="relative flex items-center" ref={viewByAnchorRef}>
-              <span className="text-xs text-gray-600 mr-2">View By</span>
+      {/* Match warning: X matched, Y unmatched; View Unmatched records link (orange) */}
+      {matchSummaryNotification && !matchWarningDismissed && !hideMatchSummaryNotification && (
+        <div className="px-4 pb-2">
+          <div className="flex items-center gap-3 px-4 py-2.5 bg-orange-500" role="status">
+            <span className="flex items-center justify-center shrink-0" aria-hidden="true">
+              <svg className="w-5 h-5 text-black shrink-0" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z" />
+              </svg>
+            </span>
+            <p className="text-sm font-medium flex-1 min-w-0 text-black">
+              {matchSummaryNotification.matchedCount} records were successfully matched and {matchSummaryNotification.unmatchedCount} records were unmatched.{' '}
               <button
                 type="button"
-                onClick={() => setViewByOpen((prev) => !prev)}
-                className="inline-flex items-center gap-1 px-3 py-1.5 border border-gray-300 rounded-full bg-white text-xs text-blue-600"
-                aria-expanded={viewByOpen}
-                aria-haspopup="listbox"
+                onClick={() => { setViewUnmatchedOnly(true); setMatchWarningDismissed(true); setCurrentPage(1) }}
+                className="underline text-black font-semibold hover:text-black/80 focus:outline-none"
               >
-                {viewByValue}
-                <svg className="w-4 h-4 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
-                  <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
-                </svg>
+                View Unmatched records
               </button>
-              {viewByOpen && (
-                <div
-                  className="absolute left-0 top-full mt-1 min-w-[8rem] py-1 bg-white border border-gray-200 rounded-lg shadow-lg z-20"
-                  role="listbox"
-                >
-                  {['All', 'Technology', 'Requested Products'].map((option) => (
-                    <button
-                      key={option}
-                      type="button"
-                      role="option"
-                      onClick={() => {
-                        setViewByValue(option)
-                        setViewByOpen(false)
-                      }}
-                      className="w-full text-left px-4 py-2 text-xs text-gray-800 hover:bg-gray-50 first:rounded-t-lg last:rounded-b-lg"
-                    >
-                      {option}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
+            </p>
+            <button
+              type="button"
+              onClick={() => setMatchWarningDismissed(true)}
+              className="shrink-0 p-1 rounded-full text-black hover:bg-black/10 focus:outline-none focus:ring-2 focus:ring-offset-1 focus:ring-current"
+              aria-label="Close notification"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      )}
+      {/* Table toolbar */}
+      <div className="flex flex-col gap-3 p-4 border-b border-gray-200">
+        {/* Row 1: Filter by (left) | Search group (right) */}
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2">
             <div className="relative flex items-center" ref={filterByAnchorRef}>
               <span className="text-xs text-gray-600 mr-2">Filter by</span>
               <button
                 type="button"
                 onClick={() => setFilterByOpen((prev) => !prev)}
-                className="inline-flex items-center gap-1 px-3 py-1.5 border border-gray-300 rounded-full bg-white text-xs text-blue-600"
+                className="inline-flex items-center gap-1 px-3 py-1.5 border border-gray-300 rounded-md bg-white text-xs text-airtel-red"
                 aria-expanded={filterByOpen}
               >
                 All
-                <svg className="w-4 h-4 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
+                <svg className="w-4 h-4 text-airtel-red" fill="currentColor" viewBox="0 0 20 20">
                   <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
                 </svg>
               </button>
@@ -1180,7 +1452,7 @@ function DataTableSection({
                       <div className="relative">
                         <button
                           type="button"
-                          onClick={() => { setConfidenceLevelDropdownOpen(false); setMatchedProductDropdownOpen(false); setMatchingStatusDropdownOpen(false); setRequestedProductDropdownOpen((o) => !o) }}
+                          onClick={() => { setConfidenceLevelDropdownOpen(false); setMatchedProductDropdownOpen(false); setMediaDropdownOpen(false); setRequestedProductDropdownOpen((o) => !o) }}
                           className="w-full flex items-center justify-between px-2.5 py-1.5 border border-gray-300 rounded-md bg-white text-left text-xs text-gray-600"
                         >
                           <span>{requestedProductFilter == null ? 'All Products' : requestedProductFilter}</span>
@@ -1190,9 +1462,9 @@ function DataTableSection({
                         </button>
                         {requestedProductDropdownOpen && (
                           <div className="absolute left-0 right-0 top-full mt-0.5 py-0.5 bg-white border border-gray-200 rounded-md shadow-lg z-10">
-                            <button type="button" onClick={() => { setRequestedProductFilter(null); setRequestedProductDropdownOpen(false) }} className="w-full text-left px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-50">All Products</button>
+                            <button type="button" onClick={() => { setRequestedProductFilter(null); setRequestedProductDropdownOpen(false) }} className="w-full text-left px-2.5 py-1.5 text-xs text-gray-700 hover:bg-grey-bg">All Products</button>
                             {REQUESTED_PRODUCTS.map((p) => (
-                              <button key={p} type="button" onClick={() => { setRequestedProductFilter(p); setRequestedProductDropdownOpen(false) }} className="w-full text-left px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-50">{p}</button>
+                              <button key={p} type="button" onClick={() => { setRequestedProductFilter(p); setRequestedProductDropdownOpen(false) }} className="w-full text-left px-2.5 py-1.5 text-xs text-gray-700 hover:bg-grey-bg">{p}</button>
                             ))}
                           </div>
                         )}
@@ -1203,7 +1475,7 @@ function DataTableSection({
                       <div className="relative">
                         <button
                           type="button"
-                          onClick={() => { setRequestedProductDropdownOpen(false); setMatchedProductDropdownOpen(false); setMatchingStatusDropdownOpen(false); setConfidenceLevelDropdownOpen((o) => !o) }}
+                          onClick={() => { setRequestedProductDropdownOpen(false); setMatchedProductDropdownOpen(false); setMediaDropdownOpen(false); setConfidenceLevelDropdownOpen((o) => !o) }}
                           className="w-full flex items-center justify-between px-2.5 py-1.5 border border-gray-300 rounded-md bg-white text-left text-xs text-gray-600"
                         >
                           <span>
@@ -1217,9 +1489,9 @@ function DataTableSection({
                         </button>
                         {confidenceLevelDropdownOpen && (
                           <div className="absolute left-0 right-0 top-full mt-0.5 py-0.5 bg-white border border-gray-200 rounded-md shadow-lg z-10">
-                            <button type="button" onClick={() => { setConfidenceLevelFilter(null); setConfidenceLevelDropdownOpen(false) }} className="w-full text-left px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-50">All Confidence Levels</button>
+                            <button type="button" onClick={() => { setConfidenceLevelFilter(null); setConfidenceLevelDropdownOpen(false) }} className="w-full text-left px-2.5 py-1.5 text-xs text-gray-700 hover:bg-grey-bg">All Confidence Levels</button>
                             {CONFIDENCE_LEVEL_OPTIONS.map((o) => (
-                              <button key={o.value} type="button" onClick={() => { setConfidenceLevelFilter(o.value); setConfidenceLevelDropdownOpen(false) }} className="w-full text-left px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-50">{o.label}</button>
+                              <button key={o.value} type="button" onClick={() => { setConfidenceLevelFilter(o.value); setConfidenceLevelDropdownOpen(false) }} className="w-full text-left px-2.5 py-1.5 text-xs text-gray-700 hover:bg-grey-bg">{o.label}</button>
                             ))}
                           </div>
                         )}
@@ -1230,7 +1502,7 @@ function DataTableSection({
                       <div className="relative">
                         <button
                           type="button"
-                          onClick={() => { setRequestedProductDropdownOpen(false); setConfidenceLevelDropdownOpen(false); setMatchingStatusDropdownOpen(false); setMatchedProductDropdownOpen((o) => !o) }}
+                          onClick={() => { setRequestedProductDropdownOpen(false); setConfidenceLevelDropdownOpen(false); setMediaDropdownOpen(false); setMatchedProductDropdownOpen((o) => !o) }}
                           className="w-full flex items-center justify-between px-2.5 py-1.5 border border-gray-300 rounded-md bg-white text-left text-xs text-gray-600"
                         >
                           <span>{matchedProductFilter == null ? 'All Matched Products' : matchedProductFilter}</span>
@@ -1240,32 +1512,32 @@ function DataTableSection({
                         </button>
                         {matchedProductDropdownOpen && (
                           <div className="absolute left-0 right-0 top-full mt-0.5 py-0.5 bg-white border border-gray-200 rounded-md shadow-lg z-10 max-h-40 overflow-y-auto">
-                            <button type="button" onClick={() => { setMatchedProductFilter(null); setMatchedProductDropdownOpen(false) }} className="w-full text-left px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-50">All Matched Products</button>
+                            <button type="button" onClick={() => { setMatchedProductFilter(null); setMatchedProductDropdownOpen(false) }} className="w-full text-left px-2.5 py-1.5 text-xs text-gray-700 hover:bg-grey-bg">All Matched Products</button>
                             {ALL_MATCHED_PRODUCT_OPTIONS.map((p) => (
-                              <button key={p} type="button" onClick={() => { setMatchedProductFilter(p); setMatchedProductDropdownOpen(false) }} className="w-full text-left px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-50">{p}</button>
+                              <button key={p} type="button" onClick={() => { setMatchedProductFilter(p); setMatchedProductDropdownOpen(false) }} className="w-full text-left px-2.5 py-1.5 text-xs text-gray-700 hover:bg-grey-bg">{p}</button>
                             ))}
                           </div>
                         )}
                       </div>
                     </div>
                     <div>
-                      <label className="block text-xs font-semibold text-gray-700 mb-1">Matching Status</label>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">Media</label>
                       <div className="relative">
                         <button
                           type="button"
-                          onClick={() => { setRequestedProductDropdownOpen(false); setConfidenceLevelDropdownOpen(false); setMatchedProductDropdownOpen(false); setMatchingStatusDropdownOpen((o) => !o) }}
+                          onClick={() => { setRequestedProductDropdownOpen(false); setConfidenceLevelDropdownOpen(false); setMatchedProductDropdownOpen(false); setMediaDropdownOpen((o) => !o) }}
                           className="w-full flex items-center justify-between px-2.5 py-1.5 border border-gray-300 rounded-md bg-white text-left text-xs text-gray-600"
                         >
-                          <span>{matchingStatusFilter == null ? 'All Matching Status' : matchingStatusFilter}</span>
+                          <span>{mediaFilter == null ? 'All Media' : mediaFilter}</span>
                           <svg className="w-3.5 h-3.5 text-gray-500 shrink-0" fill="currentColor" viewBox="0 0 20 20">
                             <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
                           </svg>
                         </button>
-                        {matchingStatusDropdownOpen && (
+                        {mediaDropdownOpen && (
                           <div className="absolute left-0 right-0 top-full mt-0.5 py-0.5 bg-white border border-gray-200 rounded-md shadow-lg z-10">
-                            <button type="button" onClick={() => { setMatchingStatusFilter(null); setMatchingStatusDropdownOpen(false) }} className="w-full text-left px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-50">All Matching Status</button>
-                            {MATCHING_STATUSES.map((s) => (
-                              <button key={s} type="button" onClick={() => { setMatchingStatusFilter(s); setMatchingStatusDropdownOpen(false) }} className="w-full text-left px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-50">{s}</button>
+                            <button type="button" onClick={() => { setMediaFilter(null); setMediaDropdownOpen(false) }} className="w-full text-left px-2.5 py-1.5 text-xs text-gray-700 hover:bg-grey-bg">All Media</button>
+                            {OTHER_FIELDS.technology.map((t) => (
+                              <button key={t} type="button" onClick={() => { setMediaFilter(t); setMediaDropdownOpen(false) }} className="w-full text-left px-2.5 py-1.5 text-xs text-gray-700 hover:bg-grey-bg">{t}</button>
                             ))}
                           </div>
                         )}
@@ -1278,27 +1550,51 @@ function DataTableSection({
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <div className="relative w-48" ref={searchAnchorRef}>
-              <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-              </svg>
               <input
                 type="text"
                 value={searchInput}
                 onChange={(e) => { setSearchInput(e.target.value); setShowSearchSuggestions(true) }}
                 onFocus={() => { if (searchInput.trim()) setShowSearchSuggestions(true) }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    setSearchFilter(searchInput.trim() || null)
+                    setShowSearchSuggestions(false)
+                  }
+                }}
                 placeholder="Search this list"
-                className="pl-8 pr-3 py-1.5 border border-gray-300 rounded-full text-xs w-48 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
+                className="pl-3 pr-9 py-1.5 border border-gray-300 rounded-lg text-xs w-48 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
                 aria-autocomplete="list"
                 aria-expanded={showSearchSuggestions && searchSuggestions.length > 0}
               />
+              {(searchFilter != null && String(searchFilter).trim() !== '') || (searchInput != null && String(searchInput).trim() !== '') ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSearchFilter(null)
+                    setSearchInput('')
+                    setShowSearchSuggestions(false)
+                  }}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded text-gray-500 hover:text-gray-700 hover:bg-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500/30"
+                  aria-label="Clear search"
+                  title="Clear search"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              ) : null}
               {showSearchSuggestions && searchSuggestions.length > 0 && (
                 <div className="absolute left-0 right-0 top-full mt-1 py-1 bg-white border border-gray-200 rounded-lg shadow-lg z-20 max-h-48 overflow-y-auto">
                   {searchSuggestions.map((s) => (
                     <button
                       key={s}
                       type="button"
-                      onClick={() => { setSearchInput(s); setShowSearchSuggestions(false) }}
-                      className="w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-50 truncate"
+                      onClick={() => {
+                        setSearchInput(s)
+                        setSearchFilter(s)
+                        setShowSearchSuggestions(false)
+                      }}
+                      className="w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-grey-bg truncate"
                     >
                       {s}
                     </button>
@@ -1308,37 +1604,8 @@ function DataTableSection({
             </div>
             <button
               type="button"
-              onClick={() => {
-                setSearchFilter(searchInput.trim() || null)
-                setShowSearchSuggestions(false)
-                setSearchInput('')
-              }}
-              className="shrink-0 h-7 w-7 flex items-center justify-center rounded-full border border-blue-600 bg-white text-blue-600 hover:bg-blue-50"
-              aria-label="Search"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-              </svg>
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setSearchFilter(null)
-                setSearchInput('')
-                setShowSearchSuggestions(false)
-              }}
-              className="shrink-0 h-7 w-7 flex items-center justify-center rounded-full border border-blue-600 bg-white text-blue-600 hover:bg-blue-50"
-              aria-label="Refresh list"
-              title="Show full list (clear search)"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-              </svg>
-            </button>
-            <button
-              type="button"
               onClick={handleMatchAllProducts}
-              className="px-4 py-1.5 rounded-full border border-blue-600 bg-white text-blue-600 text-xs font-medium hover:bg-blue-50"
+              className="px-4 py-1.5 rounded-md border border-gray-300 bg-white text-airtel-red text-xs font-medium hover:bg-grey-bg"
             >
               Match All Products
             </button>
@@ -1346,40 +1613,58 @@ function DataTableSection({
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 text-xs border-b border-gray-100">
+      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 text-xs border-b border-gray-200">
         <p className="text-gray-600">
-          Show 1 to {viewSelectedOnly ? rowsToDisplay.length : Math.min(displayedCount, groupedRows.length)} of {viewSelectedOnly ? rowsToDisplay.length : searchFilteredRows.length} records for {TOTAL_LOCATIONS} locations • {selectedRowIds.size} Records selected
+          Showing {viewSelectedOnly ? (totalRows ? 1 : 0) : (totalRows ? (currentPage - 1) * PAGE_SIZE + 1 : 0)} to {viewSelectedOnly ? rowsToDisplay.length : (totalRows ? Math.min(currentPage * PAGE_SIZE, totalRows) : 0)} of {effectiveRecordCount} records • {selectedRowIds.size} Records selected
           {viewInvalidOnly && validationByRowId && (
             <span> • Showing only unvalidated records</span>
           )}
           {viewValidOnly && validationByRowId && (
             <span> • Showing only validated records</span>
           )}
+          {viewUnmatchedOnly && (
+            <span> • Showing only unmatched records</span>
+          )}
           {statusExtras.length > 0 && !viewSelectedOnly && statusExtras.map((extra) => <span key={extra}> • {extra}</span>)}
         </p>
-        {(viewInvalidOnly || viewValidOnly) && validationByRowId ? (
-          <button type="button" onClick={() => { setViewInvalidOnly(false); setViewValidOnly(false) }} className="text-blue-600 hover:underline font-medium">
-            Show all records
-          </button>
-        ) : viewSelectedOnly ? (
-          <button type="button" onClick={() => setViewSelectedOnly(false)} className="text-blue-600 hover:underline font-medium">
-            Show all
-          </button>
-        ) : (
+        <div className="flex items-center gap-3 flex-wrap">
           <button
             type="button"
+            disabled={selectedRowIds.size === 0}
             onClick={() => selectedRowIds.size > 0 && setViewSelectedOnly(true)}
-            className={`font-medium ${selectedRowIds.size > 0 ? 'text-blue-600 hover:underline cursor-pointer' : 'text-gray-400 cursor-default'}`}
+            className={`font-medium ${selectedRowIds.size > 0 ? 'text-airtel-red hover:underline cursor-pointer' : 'text-gray-400 cursor-not-allowed'}`}
           >
-            View Selected({selectedRowIds.size})
+            View selected ({selectedRowIds.size})
           </button>
-        )}
+          <span className="text-gray-600">•</span>
+          <button
+            type="button"
+            onClick={() => {
+              setViewSelectedOnly(false)
+              setViewUnmatchedOnly(false)
+              setViewInvalidOnly(false)
+              setViewValidOnly(false)
+              setRequestedProductFilter(null)
+              setConfidenceLevelFilter(null)
+              setMatchedProductFilter(null)
+              setMediaFilter(null)
+              setSearchFilter(null)
+              setSearchInput('')
+              setCurrentPage(1)
+            }}
+            className="text-airtel-red hover:underline font-medium"
+          >
+            Show all records
+          </button>
+        </div>
+      </div>
       </div>
 
+      {/* List view: table – white background (screenshot 1) */}
       {/* Table: first 10 rows in scrollable area; row 11 (Load more) fixed at bottom; no blank row space */}
-      <div className="overflow-x-auto flex flex-col min-h-0" style={{ height: '24rem' }}>
+      <div className="overflow-x-auto flex flex-col min-h-0 bg-white" style={{ height: '24rem' }}>
         {/* Scrollable: fixed height for 10 rows so all 10 visible without scrolling */}
-        <div className="relative overflow-y-auto border-b border-gray-100 min-h-0" style={{ height: '22rem' }}>
+        <div className="relative overflow-y-auto border-b border-gray-200 min-h-0 bg-white" style={{ height: '22rem' }}>
           {(validationInProgress || isMatchLoading || revealMatchedResultsInProgress) && (
             <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-white/90" aria-live="polite">
               <div className="flex gap-1" aria-hidden="true">
@@ -1388,13 +1673,13 @@ function DataTableSection({
                 ))}
               </div>
               <p className="text-sm font-semibold text-gray-700">
-                {(isMatchLoading || revealMatchedResultsInProgress) ? 'Data is getting Validated' : 'Validation in progress...'}
+                {(isMatchLoading || revealMatchedResultsInProgress) ? 'Products are getting matched' : 'Verification in progress...'}
               </p>
             </div>
           )}
           <table className="w-full text-xs leading-tight table-fixed">
-            <thead className="sticky top-0 z-10 bg-gray-50">
-              <tr className="bg-gray-50 border-b border-gray-200">
+            <thead className="sticky top-0 z-10 bg-white">
+              <tr className="bg-white border-b border-gray-200">
                 <th className="w-10 pl-4 pr-2 py-1 text-left">
                   <input
                     type="checkbox"
@@ -1407,12 +1692,14 @@ function DataTableSection({
                         setSelectedRowIds(new Set(groupedRows.map((r) => r.id)))
                       }
                     }}
-                    className="rounded-md border-gray-300 text-blue-600 focus:ring-blue-500 w-3.5 h-3.5"
+                    className="rounded-md border-gray-300 text-airtel-red focus:ring-airtel-red w-3.5 h-3.5"
                     aria-label="Select all"
                   />
                 </th>
                 <th className="w-40 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs" title="Street Address">Street Address</th>
                 <th className="w-24 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs" title="Postal Code">Postal Code</th>
+                {isMacdQuote && <th className="w-28 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs" title="Asset Name">Asset Name</th>}
+                {isMacdQuote && <th className="w-28 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs" title="LSI">LSI</th>}
                 <th className="w-28 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs" title="Requested Products">
                   <span className="inline-flex items-center gap-0.5 truncate max-w-full">
                     Requested Products
@@ -1420,7 +1707,7 @@ function DataTableSection({
                       <button
                         type="button"
                         onClick={(e) => { e.stopPropagation(); setViewBySortDirection((prev) => (prev === 'asc' ? 'desc' : 'asc')) }}
-                        className="p-0.5 rounded hover:bg-gray-200 focus:outline-none focus:ring-1 focus:ring-gray-400"
+                        className="p-0.5 rounded hover:bg-grey-bg focus:outline-none focus:ring-1 focus:ring-gray-400"
                         title={viewBySortDirection === 'asc' ? 'Show descending order (click to toggle)' : 'Show ascending order (click to toggle)'}
                         aria-label={`Sort by Requested Products ${viewBySortDirection === 'asc' ? 'descending' : 'ascending'}`}
                       >
@@ -1436,17 +1723,16 @@ function DataTableSection({
                   </span>
                 </th>
                 <th className="w-28 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs" title="Matched Products">Matched Products</th>
-                <th className="w-28 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs" title="Matching Status">Matching Status</th>
-                <th className="w-24 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs" title="Technology">
+                <th className="w-24 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs" title="Media">
                   <span className="inline-flex items-center gap-0.5 truncate max-w-full">
-                    Technology
-                    {viewByValue === 'Technology' && (
+                    Media
+                    {viewByValue === 'Media' && (
                       <button
                         type="button"
                         onClick={(e) => { e.stopPropagation(); setViewBySortDirection((prev) => (prev === 'asc' ? 'desc' : 'asc')) }}
-                        className="p-0.5 rounded hover:bg-gray-200 focus:outline-none focus:ring-1 focus:ring-gray-400"
+                        className="p-0.5 rounded hover:bg-grey-bg focus:outline-none focus:ring-1 focus:ring-gray-400"
                         title={viewBySortDirection === 'asc' ? 'Show Fiber first (click to show Copper first)' : 'Show Copper first (click to show Fiber first)'}
-                        aria-label={`Sort by Technology ${viewBySortDirection === 'asc' ? 'descending' : 'ascending'}`}
+                        aria-label={`Sort by Media ${viewBySortDirection === 'asc' ? 'descending' : 'ascending'}`}
                       >
                         <svg className="w-3.5 h-3.5 text-gray-500 shrink-0" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
                           {viewBySortDirection === 'asc' ? (
@@ -1459,7 +1745,8 @@ function DataTableSection({
                     )}
                   </span>
                 </th>
-                <th className="w-40 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs" title="Attributes">Attributes</th>
+                <th className="w-40 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs" title={isMacdQuote ? 'Old Attributes' : 'Attributes'}>{isMacdQuote ? 'Old Attributes' : 'Attributes'}</th>
+                {isMacdQuote && <th className="w-40 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs" title="New Attributes">New Attributes</th>}
                 <th className="w-24 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs" title="Confidence Level">
                   <span className="inline-flex items-center gap-0.5 truncate max-w-full">
                     Confidence Level
@@ -1469,7 +1756,7 @@ function DataTableSection({
                         e.stopPropagation()
                         setConfidenceSortDirection((prev) => (prev === 'desc' ? 'asc' : 'desc'))
                       }}
-                      className="p-0.5 rounded hover:bg-gray-200 focus:outline-none focus:ring-1 focus:ring-gray-400"
+                      className="p-0.5 rounded hover:bg-grey-bg focus:outline-none focus:ring-1 focus:ring-gray-400"
                       title={confidenceSortDirection === 'desc' ? 'Sort ascending (low to high)' : 'Sort descending (high to low)'}
                       aria-label={`Sort by Confidence Level ${confidenceSortDirection === 'desc' ? 'ascending' : 'descending'}`}
                     >
@@ -1483,16 +1770,14 @@ function DataTableSection({
                     </button>
                   </span>
                 </th>
-                {showDataReasoningColumn && (
-                  <th className="w-32 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs" title="Data Reasoning">Data Reasoning</th>
-                )}
+                <th className="w-32 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs" title="Error Details">Error Details</th>
                 <th className="w-9 px-2 py-1" aria-label="Row actions" />
               </tr>
             </thead>
             <tbody>
               {tbodyItems.map((item, idx) =>
                 item.type === 'group' ? (
-                  <tr key={`group-${item.label}-${idx}`} className="bg-gray-100 border-b border-gray-200">
+                  <tr key={`group-${item.label}-${idx}`} className="bg-grey-bg border-b border-gray-200">
                     <td colSpan={effectiveColumnCount} className="pl-4 py-2 text-xs font-semibold text-gray-700">
                       {item.label}
                     </td>
@@ -1500,7 +1785,7 @@ function DataTableSection({
                 ) : (
                   <tr
                     key={item.row.id}
-                    className={`border-b border-gray-100 hover:bg-gray-50/50 ${idx % 2 === 1 ? 'bg-gray-50/30' : ''}`}
+                    className="border-b border-gray-100 bg-white hover:bg-gray-50"
                   >
 <td className="pl-4 pr-2 py-1 align-middle">
                   <input
@@ -1514,7 +1799,7 @@ function DataTableSection({
                         return next
                       })
                     }}
-                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500 w-3.5 h-3.5"
+                    className="rounded border-gray-300 text-airtel-red focus:ring-airtel-red w-3.5 h-3.5"
                     aria-label={`Select row ${item.row.id}`}
                   />
                 </td>
@@ -1537,6 +1822,7 @@ function DataTableSection({
                           onBlur={(e) => {
                             const v = e.target.value.trim()
                             setCellEdits((prev) => ({ ...prev, [item.row.id]: { ...prev[item.row.id], postalCode: v || item.row.postalCode } }))
+                            setLastUpdatedCells(new Set([cellKey(item.row.id, 'postalCode')]))
                             setEditingCell(null)
                           }}
                           onKeyDown={(e) => {
@@ -1547,12 +1833,13 @@ function DataTableSection({
                         />
                       )
                     ) : (
-                      <div className="inline-flex items-center gap-1 min-w-0 max-w-full">
+                      <div className="inline-flex items-center gap-1.5 min-w-0 max-w-full flex-wrap">
                         <span className="truncate" title={item.row.postalCode}>{item.row.postalCode}</span>
+                        {lastUpdatedCells.has(cellKey(item.row.id, 'postalCode')) && UPDATED_BADGE}
                         <button
                           type="button"
                           onClick={(e) => { e.stopPropagation(); setApplyPostalCodeToSelected(true); setEditingCell({ rowId: item.row.id, column: 'postalCode' }) }}
-                          className="shrink-0 text-gray-500 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-gray-200 focus:outline-none"
+                          className="shrink-0 text-gray-500 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-grey-bg focus:outline-none"
                           aria-label="Edit postal code"
                         >
                           <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
@@ -1562,6 +1849,16 @@ function DataTableSection({
                       </div>
                     )}
                   </td>
+                  {isMacdQuote && (
+                    <td className="px-2 py-1 text-gray-800 align-middle min-w-0">
+                      <div className="truncate" title={item.row.assetName}>{item.row.assetName}</div>
+                    </td>
+                  )}
+                  {isMacdQuote && (
+                    <td className="px-2 py-1 text-gray-800 align-middle min-w-0">
+                      <div className="truncate" title={item.row.lsi}>{item.row.lsi}</div>
+                    </td>
+                  )}
                   <td
                     ref={editingCell?.rowId === item.row.id && editingCell?.column === 'requestedProducts' && selectedRowIds.size >= 2 ? bulkEditAnchorRef : null}
                     className="px-2 py-1 text-gray-800 align-middle min-w-0 group"
@@ -1575,6 +1872,7 @@ function DataTableSection({
                           onChange={(e) => {
                             const v = e.target.value
                             setCellEdits((prev) => ({ ...prev, [item.row.id]: { ...prev[item.row.id], requestedProducts: v } }))
+                            setLastUpdatedCells(new Set([cellKey(item.row.id, 'requestedProducts')]))
                             setEditingCell(null)
                           }}
                           onBlur={() => setEditingCell(null)}
@@ -1587,21 +1885,15 @@ function DataTableSection({
                         </select>
                       )
                     ) : (
-                      <div className="inline-flex items-center gap-1 min-w-0 max-w-full">
-                        <span
-                          role="button"
-                          tabIndex={0}
-                          onClick={(e) => { e.stopPropagation(); if (PRODUCT_ATTRIBUTES[item.row.requestedProducts]) openAttributesModal(item.row.id, item.row.requestedProducts, item.row.attributes) }}
-                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (PRODUCT_ATTRIBUTES[item.row.requestedProducts]) openAttributesModal(item.row.id, item.row.requestedProducts, item.row.attributes) } }}
-                          className="truncate cursor-pointer hover:text-blue-600 hover:underline"
-                          title={`${item.row.requestedProducts} (click to edit attributes)`}
-                        >
+                      <div className="inline-flex items-center gap-1.5 min-w-0 max-w-full flex-wrap">
+                        <span className="truncate" title={item.row.requestedProducts}>
                           {item.row.requestedProducts}
                         </span>
+                        {lastUpdatedCells.has(cellKey(item.row.id, 'requestedProducts')) && UPDATED_BADGE}
                         <button
                           type="button"
                           onClick={(e) => { e.stopPropagation(); setApplyBulkEditToSelected(true); setEditingCell({ rowId: item.row.id, column: 'requestedProducts' }) }}
-                          className="shrink-0 text-gray-500 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-gray-200 focus:outline-none"
+                          className="shrink-0 text-gray-500 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-grey-bg focus:outline-none"
                           aria-label="Edit requested products"
                         >
                           <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
@@ -1627,66 +1919,53 @@ function DataTableSection({
                         <div className="truncate" title={item.row.matchedProducts || '---'}>{item.row.matchedProducts || '---'}</div>
                       ) : (
                       <select
-                        value={item.row.matchedProducts || (MATCHED_PRODUCTS_OPTIONS[item.row.requestedProducts]?.[0] ?? '')}
+                        value={item.row.matchedProducts || getCategoryForRequestedProduct(item.row.requestedProducts) || ''}
                         onChange={(e) => {
                           const v = e.target.value
                           // Current status from merged row (same rule when filter by Matching Status is Partial/Pending: use this row’s status for transition)
                           const currentStatus = item.row.matchingStatus || matchResults[item.row.id]?.matchingStatus || ''
                           const status = getNextMatchingStatus(currentStatus)
                           const confidenceLevel = getConfidenceLevelForMatchingStatus(status)
-                          const requestedProduct = item.row.requestedProducts
-                          const attributes = getAttributesForProduct(requestedProduct)
+                          // Attributes column should reflect the new matched product (v), not the requested product
+                          const attributes = getAttributesForProduct(v)
                           // Row-level update only: by row id. Applies the same whether or not Filter by (e.g. Matching Status = Partial/Pending) is active; no other rows change.
                           setMatchResults((prev) => ({ ...prev, [item.row.id]: { ...prev[item.row.id], matchedProducts: v, matchingStatus: status, confidenceLevel, attributes } }))
                           setEditingCell(null)
-                          // Show "Updated" badge on Matching Status (and confidence) for a few seconds
-                          const rowId = item.row.id
-                          setRowsWithStatusChange((prev) => new Set(prev).add(rowId))
-                          if (statusChangeTimeoutsRef.current[rowId]) clearTimeout(statusChangeTimeoutsRef.current[rowId])
-                          statusChangeTimeoutsRef.current[rowId] = setTimeout(() => {
-                            setRowsWithStatusChange((prev) => { const n = new Set(prev); n.delete(rowId); return n })
-                            delete statusChangeTimeoutsRef.current[rowId]
-                          }, 3000)
+                          onMatchedProductsEditComplete?.([item.row.id])
+                          setLastUpdatedCells(new Set([cellKey(item.row.id, 'matchedProducts'), cellKey(item.row.id, 'attributes')]))
                         }}
                         onBlur={() => setEditingCell(null)}
                         className="w-full min-w-[8rem] px-2 py-0.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 bg-white"
                         autoFocus
                       >
-                        {(MATCHED_PRODUCTS_OPTIONS[item.row.requestedProducts] || []).map((opt) => (
+                        {ALL_MATCHED_PRODUCT_OPTIONS.map((opt) => (
                           <option key={opt} value={opt}>{opt}</option>
                         ))}
                       </select>
                       )
                     ) : (
-                      <div className="inline-flex items-center gap-1 min-w-0 max-w-full">
-                        <span className="truncate" title={item.row.matchedProducts || '---'}>{item.row.matchedProducts || '---'}</span>
+                      <div className="inline-flex items-center gap-1.5 min-w-0 max-w-full flex-wrap">
+                        <span
+                          role="button"
+                          tabIndex={0}
+                          onClick={(e) => { e.stopPropagation(); if (PRODUCT_ATTRIBUTES[getCategoryForRequestedProduct(item.row.requestedProducts)]) openAttributesModal(item.row.id, item.row.requestedProducts, item.row.attributes) }}
+                          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (PRODUCT_ATTRIBUTES[getCategoryForRequestedProduct(item.row.requestedProducts)]) openAttributesModal(item.row.id, item.row.requestedProducts, item.row.attributes) } }}
+                          className="truncate cursor-pointer hover:text-airtel-red hover:underline"
+                          title={`${item.row.matchedProducts || '---'} (click to edit attributes)`}
+                        >
+                          {item.row.matchedProducts || '---'}
+                        </span>
+                        {lastUpdatedCells.has(cellKey(item.row.id, 'matchedProducts')) && UPDATED_BADGE}
                         <button
                           type="button"
                           onClick={(e) => { e.stopPropagation(); setApplyBulkEditToSelected(true); setEditingCell({ rowId: item.row.id, column: 'matchedProducts' }) }}
-                          className="shrink-0 text-gray-500 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-gray-200 focus:outline-none"
+                          className="shrink-0 text-gray-500 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-grey-bg focus:outline-none"
                           aria-label="Edit matched products"
                         >
                           <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
                             <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z" />
                           </svg>
                         </button>
-                      </div>
-                    )}
-                  </td>
-                  <td className="px-2 py-1 align-middle min-w-0">
-                    {isMatchLoading ? (
-                      <span className="inline-flex items-center justify-center text-gray-400" aria-hidden="true">
-                        <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-                        </svg>
-                      </span>
-                    ) : (
-                      <div className="flex items-center gap-1.5 flex-wrap min-w-0">
-                        {item.row.matchingStatus ? <StatusPill status={item.row.matchingStatus} /> : '---'}
-                        {rowsWithStatusChange.has(item.row.id) && (
-                          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-100 text-blue-700 shrink-0" title="Matching status updated">Updated</span>
-                        )}
                       </div>
                     )}
                   </td>
@@ -1703,6 +1982,7 @@ function DataTableSection({
                           onChange={(e) => {
                             const v = e.target.value
                             setCellEdits((prev) => ({ ...prev, [item.row.id]: { ...prev[item.row.id], technology: v } }))
+                            setLastUpdatedCells(new Set([cellKey(item.row.id, 'technology')]))
                             setEditingCell(null)
                           }}
                           onBlur={() => setEditingCell(null)}
@@ -1715,12 +1995,13 @@ function DataTableSection({
                         </select>
                       )
                     ) : (
-                      <div className="inline-flex items-center gap-1 min-w-0 max-w-full">
+                      <div className="inline-flex items-center gap-1.5 min-w-0 max-w-full flex-wrap">
+                        {lastUpdatedCells.has(cellKey(item.row.id, 'technology')) && UPDATED_BADGE}
                         <span className="truncate" title={item.row.technology}>{item.row.technology}</span>
                         <button
                           type="button"
                           onClick={(e) => { e.stopPropagation(); setApplyBulkEditToSelected(true); setEditingCell({ rowId: item.row.id, column: 'technology' }) }}
-                          className="shrink-0 text-gray-500 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-gray-200 focus:outline-none"
+                          className="shrink-0 text-gray-500 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-grey-bg focus:outline-none"
                           aria-label="Edit technology"
                         >
                           <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
@@ -1731,47 +2012,50 @@ function DataTableSection({
                     )}
                   </td>
                   <td className="px-2 py-1 text-gray-800 align-middle min-w-0 group">
-                    <div
-                      role="button"
-                      tabIndex={0}
-                      onClick={(e) => { e.stopPropagation(); if (PRODUCT_ATTRIBUTES[item.row.requestedProducts]) openAttributesModal(item.row.id, item.row.requestedProducts, item.row.attributes) }}
-                      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (PRODUCT_ATTRIBUTES[item.row.requestedProducts]) openAttributesModal(item.row.id, item.row.requestedProducts, item.row.attributes) } }}
-                      className="truncate cursor-pointer hover:text-blue-600 hover:underline"
-                      title={item.row.attributes ? `${item.row.attributes} (click to edit)` : 'Click to edit attributes'}
-                    >
-                      {item.row.attributes}
+                    <div className="inline-flex items-center gap-1.5 min-w-0 max-w-full flex-wrap">
+                      <span className="truncate" title={item.row.attributes || 'Edit attributes'}>
+                        {item.row.attributes}
+                      </span>
+                      {lastUpdatedCells.has(cellKey(item.row.id, 'attributes')) && UPDATED_BADGE}
+                      {PRODUCT_ATTRIBUTES[getCategoryForRequestedProduct(item.row.requestedProducts)] && (
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); openAttributesModal(item.row.id, item.row.requestedProducts, item.row.attributes) }}
+                          className="shrink-0 text-gray-500 opacity-0 group-hover:opacity-100 transition-opacity p-0.5 rounded hover:bg-grey-bg focus:outline-none"
+                          aria-label="Edit attributes"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z" />
+                          </svg>
+                        </button>
+                      )}
                     </div>
                   </td>
+                  {isMacdQuote && (
+                    <td className="px-2 py-1 text-gray-800 align-middle min-w-0">
+                      <div className="truncate" title={item.row.newAttributes || '—'}>{item.row.newAttributes || '—'}</div>
+                    </td>
+                  )}
                   <td className="px-2 py-1 text-gray-800 align-middle min-w-0">
-                    <div className="truncate flex items-center gap-1" title={item.row.matchingStatus ? `${item.row.confidenceLevel}% (${item.row.matchingStatus}: ${item.row.matchingStatus === 'Done' ? 'highest' : item.row.matchingStatus === 'Partial' ? 'medium' : 'lowest'} confidence)` : `${item.row.confidenceLevel}%`}>
+                    <div className="truncate flex items-center gap-1" title={`${item.row.confidenceLevel}%`}>
                       <span>{item.row.confidenceLevel}%</span>
-                      {rowsWithStatusChange.has(item.row.id) && (
+                      {lastUpdatedCells.has(cellKey(item.row.id, 'matchedProducts')) && (
                         <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-blue-500" title="Updated with status" aria-hidden />
                       )}
                     </div>
                   </td>
-                  {showDataReasoningColumn && (
-                    <td className="px-2 py-1 text-gray-800 align-middle min-w-0">
-                      {validationByRowId && validationByRowId[item.row.id] ? (
-                        validationByRowId[item.row.id].valid ? (
-                          <div className="inline-flex items-center gap-1.5">
-                            <span className="flex items-center justify-center w-5 h-5 rounded-full bg-emerald-600 text-white shrink-0" aria-hidden>
-                              <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                              </svg>
-                            </span>
-                            <span className="text-gray-700">Success</span>
-                          </div>
-                        ) : (
-                          <span className="truncate block text-gray-700" title={validationByRowId[item.row.id].reasoning}>
-                            {validationByRowId[item.row.id].reasoning}
-                          </span>
-                        )
+                  <td className="px-2 py-1 text-gray-800 align-middle min-w-0">
+                    {(() => {
+                      const validationErr = validationByRowId?.[item.row.id] && !validationByRowId[item.row.id].valid ? validationByRowId[item.row.id].reasoning : null
+                      const matchErr = item.row.errorDetails
+                      const err = validationErr || matchErr
+                      return err ? (
+                        <span className="truncate block text-gray-700" title={err}>{err}</span>
                       ) : (
                         <span className="text-gray-400">—</span>
-                      )}
-                    </td>
-                  )}
+                      )
+                    })()}
+                  </td>
                   <td className="px-2 py-1 align-middle">
                     <div
                       className="relative inline-block"
@@ -1783,26 +2067,19 @@ function DataTableSection({
                           e.stopPropagation()
                           setOpenMenuRowId((prev) => (prev === item.row.id ? null : item.row.id))
                         }}
-                        className="w-6 h-6 rounded-full border border-gray-300 flex items-center justify-center text-gray-500 hover:bg-gray-100 shrink-0"
+                        className="w-8 h-8 rounded-md border border-gray-200 bg-white flex items-center justify-center text-gray-500 hover:bg-gray-50 shrink-0 shadow-sm"
                         aria-label="Row actions"
                         aria-expanded={openMenuRowId === item.row.id}
                       >
-                        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                        <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
                           <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
                         </svg>
                       </button>
                       {openMenuRowId === item.row.id && (
-                        <div className="absolute right-0 top-full mt-1 z-20 min-w-[6rem] py-1 bg-white border border-gray-300 rounded-lg shadow-sm">
+                        <div className="absolute right-0 top-full mt-1 z-20 min-w-[6rem] py-1 bg-white border border-gray-300 rounded shadow-sm">
                           <button
                             type="button"
-                            className="w-full px-3 py-1.5 text-left text-xs text-gray-700 hover:bg-gray-50"
-                            onClick={() => setOpenMenuRowId(null)}
-                          >
-                            Edit
-                          </button>
-                          <button
-                            type="button"
-                            className="w-full px-3 py-1.5 text-left text-xs text-gray-700 hover:bg-gray-50"
+                            className="w-full px-3 py-1.5 text-left text-xs text-gray-700 hover:bg-grey-bg"
                             onClick={() => {
                               setDeleteModalRow({ id: item.row.id, streetAddress: item.row.streetAddress })
                               setOpenMenuRowId(null)
@@ -1820,30 +2097,41 @@ function DataTableSection({
             </tbody>
           </table>
         </div>
-        {/* Fixed 11th row: Load more (not scrollable) */}
-        {hasMore && (
-          <div className="flex-shrink-0 flex items-center justify-center w-full px-2 min-h-[1.75rem] py-1 bg-white border-t border-gray-100 text-center">
+        {/* Pagination: Previous, Page X of Y, Next — centre aligned; red secondary button style */}
+        {hasPagination && (
+          <div className="flex-shrink-0 flex items-center justify-center gap-4 w-full px-2 min-h-[2.5rem] py-2 bg-white border-t border-gray-200">
             <button
               type="button"
-              onClick={() => setDisplayedCount((prev) => Math.min(prev + 10, groupedRows.length))}
-              className="text-blue-600 hover:underline font-medium text-xs"
+              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+              disabled={currentPage <= 1}
+              className="px-3 py-1.5 rounded-md border border-gray-300 bg-white text-xs font-medium text-airtel-red disabled:opacity-50 disabled:cursor-not-allowed hover:bg-grey-bg enabled:cursor-pointer"
             >
-              Load more
+              Previous
+            </button>
+            <span className="text-xs text-gray-800">Page {currentPage} of {totalPages}</span>
+            <button
+              type="button"
+              onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+              disabled={currentPage >= totalPages}
+              className="px-3 py-1.5 rounded-md border border-gray-300 bg-white text-xs font-medium text-airtel-red disabled:opacity-50 disabled:cursor-not-allowed hover:bg-grey-bg enabled:cursor-pointer"
+            >
+              Next
             </button>
           </div>
         )}
       </div>
 
-      {/* Delete confirmation modal - styled to match screenshot */}
+      {/* Delete confirmation modal - matches attributes and other app modals; supports bulk delete when multiple rows selected */}
       {deleteModalRow && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-gray-900/50" aria-modal="true" role="dialog">
-          <div className="bg-white rounded-xl shadow-2xl max-w-md w-full overflow-hidden relative">
-            <div className="px-6 pt-8 pb-4 text-center border-b border-gray-200">
-              <h2 className="text-2xl font-bold text-[#003366]">Delete this record</h2>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40" aria-modal="true" role="dialog" onClick={(e) => { if (e.target === e.currentTarget) { setDeleteModalRow(null); setApplyDeleteToSelectedRows(false) } }}>
+          <div className="bg-white rounded-xl border border-gray-200 shadow-xl max-w-md w-full overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
+              <span className="w-8 shrink-0" aria-hidden="true" />
+              <h2 id="delete-modal-title" className="flex-1 text-base font-bold text-[#032d60] text-center">Delete this record</h2>
               <button
                 type="button"
-                onClick={() => setDeleteModalRow(null)}
-                className="absolute top-4 right-4 p-2 rounded-full bg-white text-[#003366] hover:bg-gray-100 focus:outline-none"
+                onClick={() => { setDeleteModalRow(null); setApplyDeleteToSelectedRows(false) }}
+                className="w-8 h-8 shrink-0 p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 focus:outline-none flex items-center justify-center"
                 aria-label="Close"
               >
                 <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
@@ -1851,24 +2139,43 @@ function DataTableSection({
                 </svg>
               </button>
             </div>
-            <p className="px-6 py-4 text-base text-[#444444] text-center leading-relaxed border-b border-gray-200">
+            <p className="px-5 py-4 text-sm text-gray-700 leading-relaxed">
               Are you sure you want to delete the requested product for {deleteModalRow.streetAddress}?
             </p>
-            <div className="flex justify-end gap-3 px-6 py-6">
+            {selectedRowIds.size >= 2 && (
+              <div className="shrink-0 px-5 py-2 border-t border-gray-100">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={applyDeleteToSelectedRows}
+                    onChange={(e) => setApplyDeleteToSelectedRows(e.target.checked)}
+                    className="rounded border-gray-300 text-airtel-red focus:ring-airtel-red"
+                  />
+                  <span className="text-sm text-gray-700">Delete selected ({selectedRowIds.size}) items</span>
+                </label>
+              </div>
+            )}
+            <div className="border-t border-gray-200 px-5 py-4 flex justify-end gap-2">
               <button
                 type="button"
-                onClick={() => setDeleteModalRow(null)}
-                className="px-5 py-2.5 text-base font-normal text-[#003366] bg-transparent border border-gray-500 rounded-full hover:bg-gray-50"
+                onClick={() => { setDeleteModalRow(null); setApplyDeleteToSelectedRows(false) }}
+                className="px-4 py-2 text-sm font-medium rounded-lg border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-gray-300 focus:ring-offset-1"
               >
                 Cancel
               </button>
               <button
                 type="button"
                 onClick={() => {
-                  setDeletedIds((prev) => new Set(prev).add(deleteModalRow.id))
+                  if (applyDeleteToSelectedRows && selectedRowIds.size >= 2) {
+                    setDeletedIds((prev) => new Set([...prev, ...selectedRowIds]))
+                    setSelectedRowIds(new Set())
+                  } else {
+                    setDeletedIds((prev) => new Set(prev).add(deleteModalRow.id))
+                  }
                   setDeleteModalRow(null)
+                  setApplyDeleteToSelectedRows(false)
                 }}
-                className="px-5 py-2.5 text-base font-normal text-[#C74872] bg-[#F9E0E6] border border-[#C74872] rounded-full hover:bg-[#F5D4DC]"
+                className="px-4 py-2 text-sm font-medium rounded-lg bg-airtel-red text-white hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-airtel-red focus:ring-offset-1"
               >
                 Delete
               </button>

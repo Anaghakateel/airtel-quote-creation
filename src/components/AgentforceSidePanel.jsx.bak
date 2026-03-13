@@ -83,12 +83,12 @@ const FEASIBILITY_LINK_TEXT = 'Updated proposal with Feasibility status'
 const VALIDATE_QUOTE_RESPONSE_PREFIX = 'Quote Validation will take some time. Click here to check for status - '
 const VALIDATE_QUOTE_LINK_TEXT = 'Validated Quote for HDFC Bank'
 
-const DOA_RESPONSE = 'Since the Quote is in Validation Stage, I can send it to DOA for approval'
-
 const UPGRADE_ATTRIBUTES_RESPONSE = 'Hi! I can assist you with that. Would you like to proceed with uploading the document directly or is there any other type of document?'
 const UPGRADE_ATTRIBUTES_ANALYSIS_STAGES = ['Working', 'Understanding your requirement', 'Identifying the steps', 'Finishing Up']
 const UPGRADE_ATTRIBUTES_RESPONSE_PREFIX = 'The file extraction will take some time. You can see the status here until then - '
 const UPGRADE_ATTRIBUTES_LINK_TEXT = 'New Quote for Upgrades for HDFC Bank'
+
+const DOA_RESPONSE = 'Since the Quote is in Validation Stage, I can send it to DOA for approval'
 
 const SALES_ASSISTANT_INTRO = "Hello! I'm your Airtel B2B Sales Assistant. 👋\n\nI help with sales quotes, proposals, opportunities/ quote updates and CRM queries. Start by sharing a customer account name/number or upload a file"
 const SALES_ASSISTANT_INTRO_MSG = { id: 'agent-intro', role: 'agent', text: SALES_ASSISTANT_INTRO }
@@ -208,7 +208,6 @@ function AgentforceSidePanel({
   onAddProductsAnalysisStart,
   onAddProductsAnalysisEnd,
   onUpgradeQuoteCreated,
-  onNavigateToUpgradeQuote,
   initialRestoreSnapshot,
   onPanelStateChange,
 }) {
@@ -540,6 +539,7 @@ function AgentforceSidePanel({
       return
     }
 
+    const isAfterUpgradeAttributesQuestion = lastMsg?.isUpgradeAttributesUploadQuestion === true
     if (isAfterUpgradeAttributesQuestion && isYesIntent(text)) {
       upgradeAttributesFormSubmittedRef.current = false
       setMessages((prev) => [
@@ -619,6 +619,22 @@ function AgentforceSidePanel({
   }
 
 
+  const handlePOUploadSubmit = () => {
+    const file = uploadFormFile ?? uploadFormFileInputRef.current?.files?.[0]
+    if (!file) return
+    poFormSubmittedRef.current = true
+    setUploadFormFile(null)
+    if (uploadFormFileInputRef.current) uploadFormFileInputRef.current.value = ''
+    const fileName = file.name || 'document'
+    setMessages((prev) => [
+      ...prev,
+      { id: `user-upload-${Date.now()}`, role: 'user', text: `Uploaded the document (${fileName})` },
+      { id: `agent-thanks-${Date.now()}`, role: 'agent', text: PO_THANK_YOU_TEXT, showQuote2Link: true },
+    ])
+    setTimeout(() => onQuote2POUpdated?.(), 0)
+  }
+
+  const quoteProposalAnalyzingIntervalRef = useRef(null)
   const upgradeAttributesAnalyzingIntervalRef = useRef(null)
 
   const handleUpgradeAttributesUploadSubmit = () => {
@@ -642,33 +658,15 @@ function AgentforceSidePanel({
         upgradeAttributesAnalyzingIntervalRef.current = null
         setMessages((prev) =>
           prev.map((m) =>
-            m.id === analyzingId ? { ...m, id: m.id, role: 'agent', text: UPGRADE_ATTRIBUTES_RESPONSE_PREFIX, showUpgradeQuoteLink: true, isUpgradeAttributesAnalyzing: false } : m
+            m.id === analyzingId ? { id: m.id, role: 'agent', text: UPGRADE_ATTRIBUTES_RESPONSE_PREFIX, showUpgradeQuoteLink: true } : m
           )
         )
         onUpgradeQuoteCreated?.()
         return
       }
       setMessages((prev) => prev.map((m) => (m.id === analyzingId ? { ...m, upgradeAttributesStageIndex: step } : m)))
-      scrollToBottom()
     }, 1500)
   }
-
-  const handlePOUploadSubmit = () => {
-    const file = uploadFormFile ?? uploadFormFileInputRef.current?.files?.[0]
-    if (!file) return
-    poFormSubmittedRef.current = true
-    setUploadFormFile(null)
-    if (uploadFormFileInputRef.current) uploadFormFileInputRef.current.value = ''
-    const fileName = file.name || 'document'
-    setMessages((prev) => [
-      ...prev,
-      { id: `user-upload-${Date.now()}`, role: 'user', text: `Uploaded the document (${fileName})` },
-      { id: `agent-thanks-${Date.now()}`, role: 'agent', text: PO_THANK_YOU_TEXT, showQuote2Link: true },
-    ])
-    setTimeout(() => onQuote2POUpdated?.(), 0)
-  }
-
-  const quoteProposalAnalyzingIntervalRef = useRef(null)
 
   const handleQuoteProposalUploadSubmit = () => {
     console.log('[Agentforce Upload] Submit clicked (Quote Proposal)')
@@ -787,78 +785,6 @@ function AgentforceSidePanel({
     return () => clearTimeout(t)
   }, [effectiveMessages, onAddProductsStatusShown])
 
-  // Fallback: if upgrade-attributes analyzing is stuck at last stage ("Finishing Up"), replace with final message and link
-  useEffect(() => {
-    const stuck = effectiveMessages.find((m) => m.role === 'agent' && m.isUpgradeAttributesAnalyzing === true && (m.upgradeAttributesStageIndex ?? 0) === 3)
-    if (!stuck) return
-    const id = stuck.id
-    const t = setTimeout(() => {
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === id && m.isUpgradeAttributesAnalyzing
-            ? { ...m, text: UPGRADE_ATTRIBUTES_RESPONSE_PREFIX, showUpgradeQuoteLink: true, isUpgradeAttributesAnalyzing: false }
-            : m
-        )
-      )
-      onUpgradeQuoteCreated?.()
-    }, 2500)
-    return () => clearTimeout(t)
-  }, [effectiveMessages, onUpgradeQuoteCreated])
-
-  // Fallback: if upgrade-attributes analyzing is stuck at last stage ("Finishing Up"), replace with final message and link
-  useEffect(() => {
-    const stuck = effectiveMessages.find((m) => m.role === 'agent' && m.isUpgradeAttributesAnalyzing === true && (m.upgradeAttributesStageIndex ?? 0) === 3)
-    if (!stuck) return
-    const id = stuck.id
-    const t = setTimeout(() => {
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === id && m.isUpgradeAttributesAnalyzing
-            ? { ...m, text: UPGRADE_ATTRIBUTES_RESPONSE_PREFIX, showUpgradeQuoteLink: true, isUpgradeAttributesAnalyzing: false }
-            : m
-        )
-      )
-      onUpgradeQuoteCreated?.()
-    }, 2500)
-    return () => clearTimeout(t)
-  }, [effectiveMessages, onUpgradeQuoteCreated])
-
-  // Fallback: if upgrade-attributes analyzing is stuck at last stage ("Finishing Up"), replace with final message and link
-  useEffect(() => {
-    const stuck = effectiveMessages.find((m) => m.role === 'agent' && m.isUpgradeAttributesAnalyzing === true && (m.upgradeAttributesStageIndex ?? 0) === 3)
-    if (!stuck) return
-    const id = stuck.id
-    const t = setTimeout(() => {
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === id && m.isUpgradeAttributesAnalyzing
-            ? { ...m, text: UPGRADE_ATTRIBUTES_RESPONSE_PREFIX, showUpgradeQuoteLink: true, isUpgradeAttributesAnalyzing: false }
-            : m
-        )
-      )
-      onUpgradeQuoteCreated?.()
-    }, 2500)
-    return () => clearTimeout(t)
-  }, [effectiveMessages, onUpgradeQuoteCreated])
-
-  // Fallback: if upgrade-attributes analyzing is stuck at last stage ("Finishing Up"), replace with final message and link
-  useEffect(() => {
-    const stuck = effectiveMessages.find((m) => m.role === 'agent' && m.isUpgradeAttributesAnalyzing === true && (m.upgradeAttributesStageIndex ?? 0) === 3)
-    if (!stuck) return
-    const id = stuck.id
-    const t = setTimeout(() => {
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === id && m.isUpgradeAttributesAnalyzing
-            ? { ...m, text: UPGRADE_ATTRIBUTES_RESPONSE_PREFIX, showUpgradeQuoteLink: true, isUpgradeAttributesAnalyzing: false }
-            : m
-        )
-      )
-      onUpgradeQuoteCreated?.()
-    }, 2500)
-    return () => clearTimeout(t)
-  }, [effectiveMessages, onUpgradeQuoteCreated])
-
   const handleResizeMouseDown = (e) => {
     if (isPinned) return
     e.preventDefault()
@@ -967,8 +893,7 @@ function AgentforceSidePanel({
               if (msg.showUploadForm && msg.uploadFormType === 'po' && poFormSubmittedRef.current) return null
               const laterMessages = effectiveMessages.slice(msgIdx + 1)
               const quoteProposalAlreadySubmitted = msg.uploadFormType === 'quoteProposal' && laterMessages.some((m) => m.showQuoteProposalStatusLink)
-              const upgradeAttributesAlreadySubmitted = msg.uploadFormType === 'upgradeAttributes' && laterMessages.some((m) => m.showUpgradeQuoteLink)
-              const hideUploadFormBecauseSubmitted = msg.showUploadForm && (quoteProposalAlreadySubmitted || upgradeAttributesAlreadySubmitted)
+              const hideUploadFormBecauseSubmitted = msg.showUploadForm && quoteProposalAlreadySubmitted
               return (
               <div key={msg.id} className="flex gap-3 items-start">
                 {msg.role === 'agent' ? (
@@ -1044,22 +969,6 @@ function AgentforceSidePanel({
                           <button type="button" onClick={onNavigateToValidatedQuote} className="text-airtel-red underline hover:text-red-800 focus:outline-none focus:underline">
                             {VALIDATE_QUOTE_LINK_TEXT}
                           </button>
-                        </p>
-                      ) : msg.isUpgradeAttributesAnalyzing ? (
-                        <p className="text-sm text-gray-800">
-                          {UPGRADE_ATTRIBUTES_ANALYSIS_STAGES[msg.upgradeAttributesStageIndex ?? 0]}
-                          <span className="inline-block ml-1 animate-pulse">...</span>
-                        </p>
-                      ) : msg.showUpgradeQuoteLink ? (
-                        <p className="text-sm text-gray-800 whitespace-pre-line">
-                          {UPGRADE_ATTRIBUTES_RESPONSE_PREFIX}
-                          {onNavigateToUpgradeQuote ? (
-                            <button type="button" onClick={onNavigateToUpgradeQuote} className="text-airtel-red underline hover:text-red-800 focus:outline-none focus:underline">
-                              {UPGRADE_ATTRIBUTES_LINK_TEXT}
-                            </button>
-                          ) : (
-                            <span className="text-airtel-red underline">{UPGRADE_ATTRIBUTES_LINK_TEXT}</span>
-                          )}
                         </p>
                       ) : msg.isUpdateChangeAnalyzing ? (
                         <p className="text-sm text-gray-800">
@@ -1146,7 +1055,7 @@ function AgentforceSidePanel({
                       ) : (
                         <p className="text-sm text-gray-800 whitespace-pre-line">{msg.text}</p>
                       )}
-                      {msg.showUploadForm && !hideUploadFormBecauseSubmitted && !(msg.uploadFormType === 'po' && poFormSubmittedRef.current) && !(msg.uploadFormType === 'quoteProposal' && quoteProposalFormSubmittedRef.current) && !(msg.uploadFormType === 'upgradeAttributes' && upgradeAttributesFormSubmittedRef.current) && (
+                      {msg.showUploadForm && !hideUploadFormBecauseSubmitted && !(msg.uploadFormType === 'po' && poFormSubmittedRef.current) && !(msg.uploadFormType === 'quoteProposal' && quoteProposalFormSubmittedRef.current) && (
                         <div className="mt-3 space-y-3">
                           <p className="text-xs text-gray-700 font-medium">Upload file</p>
                           <input

@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
+import { useLocations } from '../context/LocationsContext'
 
 // Parse street display from "number, Street, City, State, India"
 function getStreetDisplay(streetAddress) {
@@ -7,158 +8,490 @@ function getStreetDisplay(streetAddress) {
   return parts.length >= 2 ? `${parts[0]} ${parts[1]}` : parts[0] || ''
 }
 
-function LocationsTabContent({ locations = [] }) {
-  const [displayedCount, setDisplayedCount] = useState(10)
-  const visibleLocations = locations.slice(0, displayedCount)
-  const hasMore = displayedCount < locations.length
+const PAGE_SIZE = 5
+
+const UPDATED_BADGE = (
+  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold text-black bg-white border border-gray-300 shrink-0 ml-1.5" title="Updated">Updated</span>
+)
+
+// Inline editable cell: click to edit, blur or Enter to save
+function EditableCell({ loc, field, displayValue, onUpdate, className = '', showUpdatedBadge = false }) {
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState(displayValue ?? '')
+  const inputRef = useRef(null)
+
+  useEffect(() => {
+    if (editing && inputRef.current) {
+      inputRef.current.focus()
+      inputRef.current.select()
+    }
+  }, [editing])
+
+  useEffect(() => {
+    setValue(displayValue ?? '')
+  }, [displayValue])
+
+  const save = () => {
+    setEditing(false)
+    if (!onUpdate) return
+    const trimmed = typeof value === 'string' ? value.trim() : value
+    const current = field === 'streetAddress' ? getStreetDisplay(loc.streetAddress) : (loc[field] ?? '')
+    if (String(trimmed) === String(current)) return
+    if (field === 'streetAddress') {
+      const parts = (loc.streetAddress || '').split(',').map((p) => p.trim())
+      const rest = parts.length >= 3 ? parts.slice(2).join(', ') : [loc.city, loc.state, loc.country].filter(Boolean).join(', ')
+      onUpdate(loc.id, { streetAddress: rest ? `${trimmed}, ${rest}` : trimmed })
+    } else {
+      onUpdate(loc.id, { [field]: trimmed || undefined })
+    }
+  }
+
+  if (editing) {
+    return (
+      <td className={className}>
+        <input
+          ref={inputRef}
+          type="text"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onBlur={save}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') save()
+            if (e.key === 'Escape') {
+              setValue(displayValue ?? '')
+              setEditing(false)
+            }
+          }}
+          className="w-full min-w-0 px-1.5 py-0.5 text-xs border border-airtel-red/50 rounded focus:outline-none focus:ring-1 focus:ring-airtel-red/30 bg-white"
+        />
+      </td>
+    )
+  }
 
   return (
-    <div className="flex flex-col min-h-0 bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
-      {/* Success scoped notification: address validation completed for all locations */}
-      {locations.length > 0 && (
-        <div className="px-4 pt-4 pb-2">
-          <div className="flex items-center gap-3 px-4 py-2.5 rounded-xl bg-[#B9E6E5]" role="status">
-            <span className="flex items-center justify-center w-6 h-6 rounded-full bg-[#2D8C8C] text-white shrink-0" aria-hidden="true">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-              </svg>
-            </span>
-            <p className="text-sm font-medium flex-1 min-w-0 text-[#1a6b6b]">
-              The address validation is successfully completed for all {locations.length} locations
-            </p>
-          </div>
-        </div>
-      )}
-      {/* Toolbar: View By, Displaying, Search - simplified to match screenshot 2 */}
-      <div className="flex flex-wrap items-center justify-between gap-3 p-4 border-b border-gray-200 bg-gray-50/50">
+    <td
+      role="button"
+      tabIndex={0}
+      onClick={() => setEditing(true)}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setEditing(true) }}
+      className={`${className} cursor-text hover:bg-grey-bg/70 focus:outline-none focus:ring-1 focus:ring-inset focus:ring-airtel-red/30 rounded`}
+      title="Click to edit"
+    >
+      <span className="inline-flex flex-wrap items-center gap-y-1">
+        <span className="block break-words line-clamp-3">{displayValue || '—'}</span>
+        {showUpdatedBadge && UPDATED_BADGE}
+      </span>
+    </td>
+  )
+}
+
+function LocationsTabContent({ locations: locationsProp, configuredLocationIds = new Set(), onMarkLocationsConfigured, onUpdateLocation: onUpdateLocationProp, onSelectionChange, onDeleteLocations: onDeleteLocationsProp, showAddConfigurationsButton = true, successBannerVariant }) {
+  const { locations: ctxLocations, onUpdateLocation: ctxOnUpdate, onDeleteLocations: ctxOnDelete } = useLocations()
+  const locations = locationsProp !== undefined && locationsProp !== null ? locationsProp : ctxLocations
+  const onUpdateLocation = onUpdateLocationProp ?? ctxOnUpdate
+  const onDeleteLocations = onDeleteLocationsProp ?? ctxOnDelete
+
+  const VIEW_BY_OPTIONS = [
+    { value: 'No Grouping', label: 'No Grouping' },
+    { value: 'Show Configured locations', label: 'Show Configured locations' },
+    { value: 'Show Unconfigured locations', label: 'Show Unconfigured locations' },
+  ]
+
+  const configuredSet = configuredLocationIds instanceof Set ? configuredLocationIds : new Set(configuredLocationIds || [])
+
+  const [currentPage, setCurrentPage] = useState(1)
+  const [viewBy, setViewBy] = useState('No Grouping')
+  const [displaying, setDisplaying] = useState('All')
+  const [searchInput, setSearchInput] = useState('')
+  const [showMap, setShowMap] = useState(false)
+  const [selectedIds, setSelectedIds] = useState(new Set())
+  const [viewingSelectedOnly, setViewingSelectedOnly] = useState(false)
+  const [successMessage, setSuccessMessage] = useState(null)
+  const [deleteModalRow, setDeleteModalRow] = useState(null)
+  const [applyDeleteToSelectedRows, setApplyDeleteToSelectedRows] = useState(false)
+  const selectAllCheckboxRef = useRef(null)
+
+  const filteredByViewBy =
+    viewBy === 'Show Configured locations'
+      ? locations.filter((loc) => configuredSet.has(loc.id))
+      : viewBy === 'Show Unconfigured locations'
+        ? locations.filter((loc) => !configuredSet.has(loc.id))
+        : locations
+  const filteredLocations =
+    viewingSelectedOnly && selectedCount > 0
+      ? filteredByViewBy.filter((loc) => selectedIds.has(loc.id))
+      : filteredByViewBy
+
+  const total = filteredLocations.length
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+  const visibleLocations = filteredLocations.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE)
+  const hasPagination = total > PAGE_SIZE
+  const selectedCount = selectedIds.size
+
+  useEffect(() => {
+    onSelectionChange?.(selectedCount, selectedIds)
+  }, [selectedCount, selectedIds, onSelectionChange])
+
+  const allSelected = filteredLocations.length > 0 && filteredLocations.every((loc) => selectedIds.has(loc.id))
+  const someSelected = filteredLocations.some((loc) => selectedIds.has(loc.id))
+
+  useEffect(() => {
+    const el = selectAllCheckboxRef.current
+    if (!el) return
+    el.indeterminate = filteredLocations.length > 0 && someSelected && !allSelected
+  }, [filteredLocations.length, someSelected, allSelected])
+
+  const onViewByChange = (value) => {
+    setViewBy(value)
+    setCurrentPage(1)
+  }
+
+  useEffect(() => {
+    if (!successMessage) return
+    const t = setTimeout(() => setSuccessMessage(null), 4000)
+    return () => clearTimeout(t)
+  }, [successMessage])
+
+  return (
+    <div className="flex flex-col min-h-0 bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden relative">
+      {/* View By, Displaying | Search, Delete */}
+      <div className="flex flex-wrap items-center justify-between gap-3 p-4 border-b border-gray-200 bg-grey-bg/30">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs text-gray-600">View By</span>
-          <button
-            type="button"
-            className="inline-flex items-center gap-1 px-3 py-1.5 border border-gray-300 rounded-full bg-white text-xs text-blue-600"
-          >
-            No Grouping
-            <svg className="w-4 h-4 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
+          <div className="relative inline-block">
+            <select
+              value={viewBy}
+              onChange={(e) => onViewByChange(e.target.value)}
+              className="inline-flex items-center gap-1 pl-3 pr-8 py-1.5 border border-gray-300 rounded-md bg-white text-xs text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 appearance-none cursor-pointer"
+              aria-label="View by"
+            >
+              {VIEW_BY_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+            <svg className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500 pointer-events-none" fill="currentColor" viewBox="0 0 20 20">
               <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
             </svg>
-          </button>
+          </div>
           <span className="text-xs text-gray-600">Displaying</span>
           <button
             type="button"
-            className="inline-flex items-center gap-1 px-3 py-1.5 border border-gray-300 rounded-full bg-white text-xs text-blue-600"
+            className="inline-flex items-center gap-1 px-3 py-1.5 border border-gray-300 rounded-md bg-white text-xs text-gray-700"
           >
-            Address Validation
-            <svg className="w-4 h-4 text-blue-600" fill="currentColor" viewBox="0 0 20 20">
+            {displaying}
+            <svg className="w-4 h-4 text-gray-500" fill="currentColor" viewBox="0 0 20 20">
               <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
             </svg>
           </button>
         </div>
-        <div className="relative w-48">
-          <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-          </svg>
-          <input
-            type="text"
-            placeholder="Search this list"
-            className="pl-8 pr-3 py-1.5 border border-gray-300 rounded-full text-xs w-48 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
-          />
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative">
+            <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+            <input
+              type="text"
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              placeholder="Search this list"
+              className="pl-8 pr-3 py-1.5 border border-gray-300 rounded-md text-xs w-48 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 bg-white"
+            />
+          </div>
+          {showAddConfigurationsButton && (
+            <button
+              type="button"
+              disabled={selectedCount === 0}
+              onClick={() => {
+                if (selectedCount === 0) return
+                onMarkLocationsConfigured?.(selectedIds)
+                const msg = successBannerVariant === 'technicalEnrichment'
+                  ? `Technical attributes updates were successfully applied to ${selectedCount} location${selectedCount === 1 ? '' : 's'}`
+                  : `${selectedCount} location${selectedCount === 1 ? '' : 's'} were successfully configured`
+                setSuccessMessage(msg)
+              }}
+              className={selectedCount > 0
+                ? 'px-3 py-1.5 border border-gray-300 rounded-md bg-white text-airtel-red text-xs font-medium hover:bg-grey-bg focus:outline-none focus:ring-2 focus:ring-blue-500/20 disabled:opacity-50 disabled:cursor-not-allowed'
+                : 'px-3 py-1.5 border border-gray-300 rounded-md bg-gray-100 text-gray-500 text-xs font-medium cursor-not-allowed'}
+            >
+              Add Configurations to locations
+            </button>
+          )}
+          <button
+            type="button"
+            className="p-1.5 text-gray-500 hover:bg-grey-bg rounded focus:outline-none"
+            aria-label="Delete"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+            </svg>
+          </button>
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 text-xs border-b border-gray-100">
-        <p className="text-gray-600">
-          Showing 1 to {Math.min(displayedCount, locations.length)} of {locations.length} locations • 0 records selected
-        </p>
-        <button
-          type="button"
-          className="font-medium text-gray-400 cursor-default"
-        >
-          View Selected(0)
-        </button>
+      {successMessage && (
+        successBannerVariant === 'technicalEnrichment' ? (
+          <div className="w-full px-4 py-2" role="status">
+            <div className="flex items-center gap-3 w-full px-4 py-2 bg-green-600 text-white rounded-lg shadow-md">
+              <div className="flex-shrink-0 w-7 h-7 rounded-full bg-white/20 flex items-center justify-center">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24" aria-hidden>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                </svg>
+              </div>
+              <div className="flex-1 min-w-0 flex items-center gap-3">
+                <p className="font-bold text-xs shrink-0">Success</p>
+                <p className="text-xs font-normal opacity-95">{successMessage}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSuccessMessage(null)}
+                className="flex-shrink-0 p-1 rounded hover:bg-white/20 transition-colors focus:outline-none focus:ring-2 focus:ring-white/50"
+                aria-label="Close"
+              >
+                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="px-4 py-2 bg-green-50 border-b border-green-200 text-xs text-green-800 font-medium" role="status">
+            {successMessage}
+          </div>
+        )
+      )}
+
+      {/* Showing X - Y of Z records | View Selected (N) | Show Map toggle */}
+      <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 text-xs border-b border-gray-200 bg-white">
+        <div className="flex flex-wrap items-center gap-2 text-gray-600">
+          <span>
+            Showing {total === 0 ? '0' : (currentPage - 1) * PAGE_SIZE + 1} - {total === 0 ? 0 : Math.min(currentPage * PAGE_SIZE, total)} of {total} records.
+          </span>
+          {viewBy === 'Show Configured locations' && (
+            <span className="text-gray-700">• Grouped by configured locations ({total})</span>
+          )}
+          {viewBy === 'Show Unconfigured locations' && (
+            <span className="text-gray-700">• Grouped by unconfigured locations ({total})</span>
+          )}
+        </div>
+        <div className="flex items-center gap-4">
+          <button
+            type="button"
+            onClick={() => selectedCount > 0 && setViewingSelectedOnly(true)}
+            className={`font-medium ${selectedCount > 0 ? 'text-airtel-red hover:underline cursor-pointer' : 'text-gray-400 cursor-default'}`}
+          >
+            View Selected ({selectedCount})
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewingSelectedOnly(false)}
+            className="text-airtel-red hover:underline text-xs font-medium cursor-pointer underline"
+          >
+            Show all records
+          </button>
+          <div className="flex items-center gap-2">
+            <span className="text-gray-600">Show Map</span>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={showMap}
+              onClick={() => setShowMap((prev) => !prev)}
+              className={`relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:ring-offset-1 ${showMap ? 'bg-airtel-red' : 'bg-gray-300'}`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition-transform ${showMap ? 'translate-x-4' : 'translate-x-1'}`}
+              />
+            </button>
+          </div>
+        </div>
       </div>
 
-      <div className="overflow-x-auto flex flex-col min-h-0" style={{ height: '24rem' }}>
-        <div className="overflow-y-auto border-b border-gray-100 min-h-0" style={{ height: '22rem' }}>
-          <table className="w-full text-xs leading-tight table-fixed">
-            <thead className="sticky top-0 z-10 bg-gray-50">
-              <tr className="bg-gray-50 border-b border-gray-200">
-                <th className="w-10 pl-4 pr-2 py-1 text-left">
+      {/* Table - wider rows, 5 records at a time; pagination fixed at bottom */}
+      <div className="overflow-x-auto flex flex-col min-h-0 flex-1 flex-shrink-0" style={{ minHeight: '20rem' }}>
+        <div className="overflow-y-auto border-b border-gray-200 min-h-0 flex-1">
+          <table className="w-full text-xs leading-relaxed table-fixed locations-table" style={{ minWidth: '72rem' }}>
+            <thead className="sticky top-0 z-10 bg-gray-100">
+              <tr className="border-b border-gray-200">
+                <th className="w-10 pl-4 pr-2 py-4 text-left">
                   <input
+                    ref={selectAllCheckboxRef}
                     type="checkbox"
-                    className="rounded-md border-gray-300 text-blue-600 focus:ring-blue-500 w-3.5 h-3.5"
-                    aria-label="Select all"
+                    className="rounded border-gray-300 text-airtel-red focus:ring-airtel-red/20 w-3.5 h-3.5"
+                    aria-label="Select all rows"
+                    checked={allSelected}
+                    onChange={(e) => {
+                      if (e.target.checked) {
+                        setSelectedIds(new Set(filteredLocations.map((loc) => loc.id)))
+                      } else {
+                        setSelectedIds(new Set())
+                      }
+                    }}
                   />
                 </th>
-                <th className="w-40 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs">Street Address</th>
-                <th className="w-28 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs">City</th>
-                <th className="w-24 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs">State</th>
-                <th className="w-20 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs">Country</th>
-                <th className="w-24 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs">Postal Code</th>
-                <th className="w-28 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs">Location Type</th>
-                <th className="w-28 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs">Pincode Validation</th>
-                <th className="w-28 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs">
-                  <span className="inline-flex items-center gap-0.5">
-                    Address Validation
-                    <svg className="w-3.5 h-3.5 text-gray-500 shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                      <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
-                    </svg>
-                  </span>
-                </th>
+                <th className="w-24 px-2 py-4 text-left font-semibold text-gray-900">Offer Assigned</th>
+                <th className="min-w-[14rem] px-2 py-4 text-left font-semibold text-gray-900">Street Address</th>
+                <th className="w-20 px-2 py-4 text-left font-semibold text-gray-900">Floor No</th>
+                <th className="w-20 px-2 py-4 text-left font-semibold text-gray-900">Flat No</th>
+                <th className="min-w-[6rem] px-2 py-4 text-left font-semibold text-gray-900">City</th>
+                <th className="min-w-[5rem] px-2 py-4 text-left font-semibold text-gray-900">State</th>
+                <th className="min-w-[5rem] px-2 py-4 text-left font-semibold text-gray-900">Country</th>
+                <th className="w-24 px-2 py-4 text-left font-semibold text-gray-900">Premises</th>
+                <th className="w-24 px-2 py-4 text-left font-semibold text-gray-900">Postal Code</th>
+                <th className="w-28 px-2 py-4 text-left font-semibold text-gray-900">Service Point</th>
+                <th className="w-28 px-2 py-4 text-left font-semibold text-gray-900">Location Type</th>
+                <th className="w-28 px-2 py-4 text-left font-semibold text-gray-900">Solution Type</th>
+                <th className="w-20 px-2 py-4 text-left font-semibold text-gray-900">Circle</th>
+                <th className="w-28 px-2 py-4 text-left font-semibold text-gray-900">Source</th>
               </tr>
             </thead>
             <tbody>
-              {visibleLocations.map((loc, idx) => {
-                const street = getStreetDisplay(loc.streetAddress)
-                const city = loc.city ?? ''
-                const state = loc.state ?? ''
-                const country = loc.country || 'India'
-                return (
-                  <tr
-                    key={loc.id}
-                    className={`border-b border-gray-100 hover:bg-gray-50/50 ${idx % 2 === 1 ? 'bg-gray-50/30' : ''}`}
-                  >
-                    <td className="pl-4 pr-2 py-1 align-middle">
-                      <input
-                        type="checkbox"
-                        className="rounded-md border-gray-300 text-blue-600 focus:ring-blue-500 w-3.5 h-3.5"
-                        aria-label="Select row"
-                      />
-                    </td>
-                    <td className="px-2 py-1 text-gray-800 align-middle min-w-0 truncate" title={street}>{street || '—'}</td>
-                    <td className="px-2 py-1 text-gray-800 align-middle min-w-0 truncate" title={city}>{city || '—'}</td>
-                    <td className="px-2 py-1 text-gray-800 align-middle min-w-0 truncate" title={state}>{state || '—'}</td>
-                    <td className="px-2 py-1 text-gray-800 align-middle min-w-0 truncate" title={country}>{country || '—'}</td>
-                    <td className="px-2 py-1 text-gray-800 align-middle min-w-0 truncate" title={loc.postalCode}>{loc.postalCode || '—'}</td>
-                    <td className="px-2 py-1 text-gray-500 align-middle">—</td>
-                    <td className="px-2 py-1 text-gray-500 align-middle">—</td>
-                    <td className="px-2 py-1 align-middle">
-                      <div className="inline-flex items-center gap-1.5">
-                        <span className="flex items-center justify-center w-5 h-5 rounded-full bg-emerald-600 text-white shrink-0" aria-hidden>
-                          <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                          </svg>
-                        </span>
-                        <span className="text-gray-700">Success</span>
-                      </div>
-                    </td>
-                  </tr>
-                )
-              })}
+              {visibleLocations.length === 0 ? (
+                <tr>
+                  <td colSpan={15} className="px-4 py-8 text-center text-gray-500">
+                    No locations to display.
+                  </td>
+                </tr>
+              ) : (
+                visibleLocations.map((loc) => {
+                  const streetDisplay = getStreetDisplay(loc.streetAddress)
+                  const cellClass = 'px-2 py-4 text-gray-800 align-middle leading-relaxed min-h-[7rem]'
+                  return (
+                    <tr
+                      key={loc.id}
+                      className="border-b border-gray-100 hover:bg-grey-bg/50"
+                    >
+                      <td className="pl-4 pr-2 py-4 align-middle min-h-[7rem]">
+                        <input
+                          type="checkbox"
+                          className="rounded border-gray-300 text-airtel-red focus:ring-airtel-red/20 w-3.5 h-3.5"
+                          aria-label="Select row"
+                          checked={selectedIds.has(loc.id)}
+                          onChange={(e) => {
+                            setSelectedIds((prev) => {
+                              const next = new Set(prev)
+                              if (e.target.checked) next.add(loc.id)
+                              else next.delete(loc.id)
+                              return next
+                            })
+                          }}
+                        />
+                      </td>
+                      <td className="px-2 py-4 text-gray-800 align-middle min-h-[7rem]">
+                        {loc.productsAssigned !== false ? (
+                          <span className="inline-flex items-center justify-center w-3 h-3 rounded-full bg-green-700 text-white shrink-0" aria-label="Offer assigned" title="Products assigned">
+                            <svg className="w-2 h-2" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                            </svg>
+                          </span>
+                        ) : (
+                          '—'
+                        )}
+                      </td>
+                      <EditableCell loc={loc} field="streetAddress" displayValue={streetDisplay} onUpdate={onUpdateLocation} className={`${cellClass} min-w-[14rem]`} showUpdatedBadge={configuredSet.has(loc.id)} />
+                      <EditableCell loc={loc} field="floorNo" displayValue={loc.floorNo ?? ''} onUpdate={onUpdateLocation} className={cellClass} />
+                      <EditableCell loc={loc} field="flatNo" displayValue={loc.flatNo ?? ''} onUpdate={onUpdateLocation} className={cellClass} />
+                      <EditableCell loc={loc} field="city" displayValue={loc.city ?? ''} onUpdate={onUpdateLocation} className={cellClass} />
+                      <EditableCell loc={loc} field="state" displayValue={loc.state ?? ''} onUpdate={onUpdateLocation} className={cellClass} />
+                      <EditableCell loc={loc} field="country" displayValue={loc.country || 'India'} onUpdate={onUpdateLocation} className={cellClass} />
+                      <EditableCell loc={loc} field="premises" displayValue={loc.premises ?? ''} onUpdate={onUpdateLocation} className={cellClass} />
+                      <EditableCell loc={loc} field="postalCode" displayValue={loc.postalCode ?? ''} onUpdate={onUpdateLocation} className={cellClass} />
+                      <EditableCell loc={loc} field="servicePoint" displayValue={loc.servicePoint ?? ''} onUpdate={onUpdateLocation} className={cellClass} />
+                      <EditableCell loc={loc} field="locationType" displayValue={loc.locationType ?? ''} onUpdate={onUpdateLocation} className={cellClass} />
+                      <EditableCell loc={loc} field="solutionType" displayValue={loc.solutionType ?? ''} onUpdate={onUpdateLocation} className={cellClass} />
+                      <EditableCell loc={loc} field="circle" displayValue={loc.circle ?? ''} onUpdate={onUpdateLocation} className={cellClass} />
+                      <td className="px-2 py-4 text-gray-800 align-middle text-gray-600 leading-relaxed min-h-[7rem]" title="Read only">{loc.source === 'File Uploaded' || loc.source === 'File Upload' ? 'File Uploaded' : (loc.source || 'AI Extracted')}</td>
+                    </tr>
+                  )
+                })
+              )}
             </tbody>
           </table>
         </div>
-        {hasMore && (
-          <div className="flex-shrink-0 flex items-center justify-center w-full px-2 min-h-[1.75rem] py-1 bg-white border-t border-gray-100 text-center">
-            <button
-              type="button"
-              onClick={() => setDisplayedCount((prev) => Math.min(prev + 10, locations.length))}
-              className="text-blue-600 hover:underline font-medium text-xs"
-            >
-              Load more
-            </button>
-          </div>
-        )}
+        {/* Previous / Next pagination at bottom - always visible like other list views */}
+        <div className="flex-shrink-0 flex items-center justify-center gap-4 w-full px-4 py-3 bg-white border-t border-gray-200">
+          <button
+            type="button"
+            onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+            disabled={currentPage <= 1}
+            className="px-3 py-1.5 rounded-md border border-gray-300 bg-white text-xs font-medium text-airtel-red disabled:opacity-50 disabled:cursor-not-allowed hover:bg-grey-bg enabled:cursor-pointer"
+          >
+            Previous
+          </button>
+          <span className="text-xs text-gray-800">Page {currentPage} of {totalPages}</span>
+          <button
+            type="button"
+            onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+            disabled={currentPage >= totalPages}
+            className="px-3 py-1.5 rounded-md border border-gray-300 bg-white text-xs font-medium text-airtel-red disabled:opacity-50 disabled:cursor-not-allowed hover:bg-grey-bg enabled:cursor-pointer"
+          >
+            Next
+          </button>
+        </div>
       </div>
+
+      {/* Delete confirmation modal - supports bulk delete when multiple rows selected */}
+      {deleteModalRow && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40" aria-modal="true" role="dialog" onClick={(e) => { if (e.target === e.currentTarget) { setDeleteModalRow(null); setApplyDeleteToSelectedRows(false) } }}>
+          <div className="bg-white rounded-xl border border-gray-200 shadow-xl max-w-md w-full overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
+              <span className="w-8 shrink-0" aria-hidden="true" />
+              <h2 id="delete-modal-title" className="flex-1 text-base font-bold text-[#032d60] text-center">Delete this record</h2>
+              <button
+                type="button"
+                onClick={() => { setDeleteModalRow(null); setApplyDeleteToSelectedRows(false) }}
+                className="w-8 h-8 shrink-0 p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 focus:outline-none flex items-center justify-center"
+                aria-label="Close"
+              >
+                <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                </svg>
+              </button>
+            </div>
+            <p className="px-5 py-4 text-sm text-gray-700 leading-relaxed">
+              Are you sure you want to delete this record for {deleteModalRow.streetAddress}?
+            </p>
+            {selectedIds.size >= 2 && (
+              <div className="shrink-0 px-5 py-2 border-t border-gray-100">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={applyDeleteToSelectedRows}
+                    onChange={(e) => setApplyDeleteToSelectedRows(e.target.checked)}
+                    className="rounded border-gray-300 text-airtel-red focus:ring-airtel-red"
+                  />
+                  <span className="text-sm text-gray-700">Delete selected ({selectedIds.size}) items</span>
+                </label>
+              </div>
+            )}
+            <div className="border-t border-gray-200 px-5 py-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => { setDeleteModalRow(null); setApplyDeleteToSelectedRows(false) }}
+                className="px-4 py-2 text-sm font-medium rounded-lg border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-gray-300 focus:ring-offset-1"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (applyDeleteToSelectedRows && selectedIds.size >= 2) {
+                    onDeleteLocations?.(Array.from(selectedIds))
+                    setSelectedIds(new Set())
+                  } else {
+                    onDeleteLocations?.([deleteModalRow.id])
+                  }
+                  setDeleteModalRow(null)
+                  setApplyDeleteToSelectedRows(false)
+                }}
+                className="px-4 py-2 text-sm font-medium rounded-lg bg-airtel-red text-white hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-airtel-red focus:ring-offset-1"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -1,32 +1,64 @@
 import { useState, useMemo, useEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
 
-const PRODUCTS = ['MPLS', 'SD WAN', 'Internet']
+const PRODUCTS = ['Internet', 'SD WAN', 'MPLS']
 const FEASIBILITY_STATUSES = ['Progress', 'Complete', 'Failure']
+const FEASIBILITY_RESULT_STATUSES = ['Success', 'Partial', 'Failure'] // after Check Feasibility: green, orange, red
 
-// Build summary rows from locations; ensure exactly 50 are MPLS + Failure for the warning
-function buildSummaryRows(locations) {
+function formatINR(num) {
+  if (num == null) return '₹0.00'
+  const n = Number(num)
+  if (n === 0) return '₹0.00'
+  return '₹' + n.toLocaleString('en-IN', { minimumFractionDigits: 0, maximumFractionDigits: 0 })
+}
+
+const ERROR_SUMMARY_MESSAGES = [
+  'Feasibility check failed for this product at the given location.',
+  'Technology not available at location.',
+  'Postal code out of service area.',
+]
+const INTERNET_CONFIG_ERROR_MESSAGE = 'Certain configuration mandatory attributes are missing.'
+
+// Build summary rows from locations: mix of Internet, SD WAN, MPLS; random rows get Failure + error.
+// When useFeasibilityResults is true, feasibilityStatus is one of Success, Partial, Failure (for post–Check Feasibility view).
+export function buildSummaryRows(locations, useFeasibilityResults = false) {
   if (!locations || locations.length === 0) return []
   const rows = locations.map((loc, i) => {
     const product = PRODUCTS[i % PRODUCTS.length]
-    const feasibility = FEASIBILITY_STATUSES[i % FEASIBILITY_STATUSES.length]
-    return {
+    const oneTime = 10000 + Math.floor(Math.random() * 150000)
+    const arcTotal = 135300 + Math.floor(Math.random() * 50000)
+    const feasibilityStatus = useFeasibilityResults
+      ? FEASIBILITY_RESULT_STATUSES[Math.floor(Math.random() * FEASIBILITY_RESULT_STATUSES.length)]
+      : (() => {
+          const isFailure = Math.random() < 0.2
+          return isFailure ? 'Failure' : FEASIBILITY_STATUSES[Math.floor(Math.random() * 2)]
+        })()
+    const row = {
       id: loc.id,
-      memberGroup: loc.streetAddress,
-      product,
-      feasibilityStatus: feasibility,
+      memberGroup: loc.streetAddress || loc.city || '—',
+      siteFloor: '—',
+      media: '—',
+      maxBandwidth: '—',
+      tax: '—',
+      erpStatus: '—',
       quantity: 1,
-      oneTimeTotal: 100 + Math.floor(Math.random() * 400),
-      recurringTotal: 50 + Math.floor(Math.random() * 150),
-      billingAccount: '—',
-      serviceId: '—',
-      connectDate: '—',
+      product,
+      productDisplay: product,
+      itemCode: '—',
+      arcTotal,
+      feasibilityStatus,
+      crossConnect: '—',
+      circuitId: '—',
+      changeRequest: 'New',
+      subActivity: '----------',
+      recurringTotal: i % 3 === 0 ? 0 : 50 + Math.floor(Math.random() * 150),
+      oneTimeTotal: oneTime,
     }
+    if (!useFeasibilityResults && feasibilityStatus === 'Failure') {
+      row.errorSummary = ERROR_SUMMARY_MESSAGES[Math.floor(Math.random() * ERROR_SUMMARY_MESSAGES.length)]
+    }
+    return row
   })
-  // Set exactly 50 rows to MPLS + Failure (use first 50 indices)
-  for (let i = 0; i < 50 && i < rows.length; i++) {
-    rows[i].product = 'MPLS'
-    rows[i].feasibilityStatus = 'Failure'
-  }
   return rows
 }
 
@@ -37,7 +69,7 @@ function SortIcon({ column, sortColumn, sortDirection, onClick }) {
     <button
       type="button"
       onClick={onClick}
-      className="p-0.5 rounded hover:bg-gray-200 focus:outline-none focus:ring-1 focus:ring-gray-400 mr-0.5 shrink-0 inline-flex"
+      className="p-0.5 rounded hover:bg-grey-bg focus:outline-none focus:ring-1 focus:ring-gray-400 mr-0.5 shrink-0 inline-flex"
       title={isActive ? `Sort ${sortDirection === 'desc' ? 'ascending' : 'descending'}` : 'Sort'}
       aria-label={`Sort by ${column}`}
     >
@@ -53,39 +85,62 @@ function SortIcon({ column, sortColumn, sortDirection, onClick }) {
 }
 
 function FeasibilityBadge({ status }) {
+  // Pill-shaped badges: Success (green/white), Partial (orange/black), Failure (red/white)
   const styles = {
-    Progress: 'bg-amber-100 text-amber-800 border border-amber-300',
-    Complete: 'bg-emerald-100 text-emerald-800 border border-emerald-300',
-    Failure: 'bg-red-100 text-red-800 border border-red-300',
+    Progress: 'bg-amber-100 text-amber-800 border border-amber-300 rounded-md',
+    Complete: 'bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-md',
+    Success: 'bg-green-600 text-white font-bold rounded-full',
+    Partial: 'bg-orange-600 text-black font-bold rounded-full',
+    Failure: 'bg-red-600 text-white font-bold rounded-full',
   }
+  const baseClass = 'inline-flex items-center justify-center px-3 py-0.5 text-xs min-w-[4.5rem]'
   return (
-    <span className={`inline-flex px-1.5 py-0.5 rounded-md text-xs font-medium border ${styles[status] || 'bg-gray-100 text-gray-700'}`}>
+    <span className={`${baseClass} ${styles[status] || 'bg-gray-200 text-gray-700 rounded-md'}`}>
       {status}
     </span>
   )
 }
 
-function SummaryTabContent({ locations = [], onTotalsChange }) {
-  const summaryRows = useMemo(() => buildSummaryRows(locations), [locations])
-  const [displayedCount, setDisplayedCount] = useState(10)
+const UPDATED_BADGE = (
+  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold text-black bg-white border border-gray-300 shrink-0 ml-1.5" title="Updated">Updated</span>
+)
+
+function SummaryTabContent({ locations = [], onTotalsChange, onEditRow, showFeasibilityEmptyInitially = false, updatedProductHighlight = null, updatedProductRowIds, showFeasibilityResults = false }) {
+  const updatedRowIdsSet = updatedProductRowIds instanceof Set ? updatedProductRowIds : new Set(updatedProductRowIds || [])
+  const summaryRows = useMemo(() => buildSummaryRows(locations, showFeasibilityResults), [locations, showFeasibilityResults])
+  const PAGE_SIZE = 10
+  const [currentPage, setCurrentPage] = useState(1)
   const [showFeasibilityErrorOnly, setShowFeasibilityErrorOnly] = useState(false)
   const [notificationDismissed, setNotificationDismissed] = useState(false)
-  const [filterByOpen, setFilterByOpen] = useState(false)
-  const [productFilter, setProductFilter] = useState(null)
-  const [feasibilityFilter, setFeasibilityFilter] = useState(null)
+  const [viewBy, setViewBy] = useState('No Grouping')
+  const [displaying, setDisplaying] = useState('All')
   const [searchInput, setSearchInput] = useState('')
   const [searchFilter, setSearchFilter] = useState(null)
   const [showSearchSuggestions, setShowSearchSuggestions] = useState(false)
-  const [productDropdownOpen, setProductDropdownOpen] = useState(false)
-  const [feasibilityDropdownOpen, setFeasibilityDropdownOpen] = useState(false)
-  const [sortColumn, setSortColumn] = useState(null) // 'memberGroup' | 'product' | 'feasibilityStatus' | 'quantity' | 'oneTimeTotal' | 'recurringTotal'
-  const [sortDirection, setSortDirection] = useState('asc') // 'asc' | 'desc'
+  const [sortColumn, setSortColumn] = useState(null)
+  const [sortDirection, setSortDirection] = useState('asc')
   const [openMenuRowId, setOpenMenuRowId] = useState(null)
   const [deletedIds, setDeletedIds] = useState(() => new Set())
-  const [deleteModalRow, setDeleteModalRow] = useState(null) // { id, memberGroup }
-  const filterByRef = useRef(null)
+  const [deleteModalRow, setDeleteModalRow] = useState(null)
+  const [applyDeleteToSelectedRows, setApplyDeleteToSelectedRows] = useState(false)
+  const [selectedIds, setSelectedIds] = useState(() => new Set())
   const searchAnchorRef = useRef(null)
   const menuAnchorRef = useRef(null)
+  const [filterByOpen, setFilterByOpen] = useState(false)
+  const [productFilter, setProductFilter] = useState(null)
+  const [feasibilityFilter, setFeasibilityFilter] = useState(null)
+  const [productDropdownOpen, setProductDropdownOpen] = useState(false)
+  const [feasibilityDropdownOpen, setFeasibilityDropdownOpen] = useState(false)
+  const [errorPopoverRow, setErrorPopoverRow] = useState(null) // { id, message } when Error Summary popover is open
+  const errorPopoverAnchorRef = useRef(null)
+  const errorPopoverCloseTimeoutRef = useRef(null)
+  const selectAllCheckboxRef = useRef(null)
+
+  useEffect(() => {
+    return () => {
+      if (errorPopoverCloseTimeoutRef.current) clearTimeout(errorPopoverCloseTimeoutRef.current)
+    }
+  }, [])
 
   // Close row overflow menu when clicking outside
   useEffect(() => {
@@ -99,20 +154,7 @@ function SummaryTabContent({ locations = [], onTotalsChange }) {
     return () => document.removeEventListener('click', handleClickOutside)
   }, [openMenuRowId])
 
-  // Close Filter by popup when clicking outside
-  useEffect(() => {
-    const handleClickOutside = (e) => {
-      if (filterByRef.current && !filterByRef.current.contains(e.target)) {
-        setFilterByOpen(false)
-        setProductDropdownOpen(false)
-        setFeasibilityDropdownOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [])
-
-  // Close search suggestions when clicking outside (same as Extracted Information tab)
+  // Close search suggestions when clicking outside
   useEffect(() => {
     if (!showSearchSuggestions) return
     const handleClickOutside = (e) => {
@@ -126,23 +168,14 @@ function SummaryTabContent({ locations = [], onTotalsChange }) {
 
   let rowsToDisplay = summaryRows.filter((r) => !deletedIds.has(r.id))
   if (showFeasibilityErrorOnly) rowsToDisplay = rowsToDisplay.filter((r) => r.feasibilityStatus === 'Failure')
-  if (productFilter) rowsToDisplay = rowsToDisplay.filter((r) => r.product === productFilter)
-  if (feasibilityFilter) rowsToDisplay = rowsToDisplay.filter((r) => r.feasibilityStatus === feasibilityFilter)
 
-  // Search suggestions from current data (same pattern as Extracted Information tab)
   const searchSuggestions = useMemo(() => {
     const q = searchInput.trim().toLowerCase()
     if (q.length === 0) return []
     const seen = new Set()
     const out = []
     for (const row of rowsToDisplay) {
-      const candidates = [
-        row.memberGroup,
-        row.product,
-        row.feasibilityStatus,
-        String(row.oneTimeTotal ?? ''),
-        String(row.recurringTotal ?? ''),
-      ]
+      const candidates = [row.memberGroup, row.product, row.feasibilityStatus, String(row.oneTimeTotal ?? ''), String(row.recurringTotal ?? '')]
       for (const v of candidates) {
         const s = String(v || '').trim()
         if (s && s.toLowerCase().includes(q) && !seen.has(s)) {
@@ -178,8 +211,10 @@ function SummaryTabContent({ locations = [], onTotalsChange }) {
       return 0
     })
   }
-  const visibleRows = rowsToDisplay.slice(0, displayedCount)
-  const hasMore = displayedCount < rowsToDisplay.length
+  const totalRows = rowsToDisplay.length
+  const totalPages = Math.max(1, Math.ceil(totalRows / PAGE_SIZE))
+  const visibleRows = rowsToDisplay.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE)
+  const hasPagination = totalRows > PAGE_SIZE
 
   // Totals from summary rows excluding deleted
   const totals = useMemo(() => {
@@ -192,7 +227,15 @@ function SummaryTabContent({ locations = [], onTotalsChange }) {
     onTotalsChange?.(totals)
   }, [totals.oneTimeTotal, totals.monthlyTotal, totals.quoteTotal, onTotalsChange])
 
-  const feasibilityErrorCount = summaryRows.filter((r) => r.product === 'MPLS' && r.feasibilityStatus === 'Failure').length
+  useEffect(() => {
+    const el = selectAllCheckboxRef.current
+    if (!el) return
+    const visibleIds = visibleRows.map((r) => r.id)
+    const selectedOnPage = visibleIds.filter((id) => selectedIds.has(id)).length
+    el.indeterminate = selectedOnPage > 0 && selectedOnPage < visibleIds.length
+  }, [visibleRows, selectedIds])
+
+  const feasibilityErrorCount = summaryRows.filter((r) => r.feasibilityStatus === 'Failure').length
 
   const handleSort = (column) => {
     const nextDir = sortColumn === column ? (sortDirection === 'asc' ? 'desc' : 'asc') : 'asc'
@@ -202,47 +245,30 @@ function SummaryTabContent({ locations = [], onTotalsChange }) {
 
   return (
     <div className="flex flex-col min-h-0 bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
-      {/* Warning scoped notification */}
-      {feasibilityErrorCount > 0 && !notificationDismissed && (
-        <div className="px-4 pt-4 pb-2">
-          <div className="flex items-center gap-3 px-4 py-2.5 rounded-xl bg-[#FDF1DB]" role="status">
-            <span className="flex items-center justify-center shrink-0" aria-hidden="true">
-              <svg className="w-5 h-5 text-amber-800 shrink-0" fill="currentColor" viewBox="0 0 24 24">
-                <path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z" />
-              </svg>
-            </span>
-            <p className="text-sm font-medium flex-1 min-w-0 text-amber-900">
-              {feasibilityErrorCount} locations with the specific MPLS product have feasibility errors that needs to be sorted{' '}
-              <button
-                type="button"
-                onClick={() => setShowFeasibilityErrorOnly(true)}
-                className="underline text-amber-900 hover:text-amber-950 focus:outline-none"
-              >
-                show records with feasibility error
-              </button>
-            </p>
-            <button
-              type="button"
-              onClick={() => setNotificationDismissed(true)}
-              className="shrink-0 p-1 rounded-full text-amber-900 hover:bg-amber-900/10 focus:outline-none"
-              aria-label="Close notification"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-              </svg>
-            </button>
-          </div>
+      {/* Toolbar: View By, Displaying (left) | Search, actions (right) */}
+      <div className="flex flex-wrap items-center justify-between gap-3 p-4 border-b border-gray-200 bg-grey-bg/30">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-gray-600">View By</span>
+          <button type="button" className="inline-flex items-center gap-1 px-3 py-1.5 border border-gray-300 rounded-md bg-white text-xs text-gray-700">
+            {viewBy}
+            <svg className="w-4 h-4 text-gray-500" fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M5.293 7.293a1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
+            </svg>
+          </button>
+          <span className="text-xs text-gray-600">Displaying</span>
+          <button type="button" className="inline-flex items-center gap-1 px-3 py-1.5 border border-gray-300 rounded-md bg-white text-xs text-gray-700">
+            {displaying}
+            <svg className="w-4 h-4 text-gray-500" fill="currentColor" viewBox="0 0 20 20">
+              <path fillRule="evenodd" d="M5.293 7.293a1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
+            </svg>
+          </button>
         </div>
-      )}
-
-      {/* Toolbar: Filter by (left) | Search (right) */}
-      <div className="flex flex-col gap-3 p-4 border-b border-gray-200 bg-gray-50/50">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="relative flex items-center" ref={filterByRef}>
-              <span className="text-xs text-gray-600 mr-2">Filter by</span>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative" aria-hidden>
+            {/* search + actions */}
               <button
                 type="button"
+                style={{ display: 'none' }}
                 onClick={() => setFilterByOpen((prev) => !prev)}
                 className="inline-flex items-center gap-1 px-3 py-1.5 border border-gray-300 rounded-full bg-white text-xs text-blue-600"
                 aria-expanded={filterByOpen}
@@ -270,9 +296,9 @@ function SummaryTabContent({ locations = [], onTotalsChange }) {
                         </button>
                         {productDropdownOpen && (
                           <div className="absolute left-0 right-0 top-full mt-0.5 py-0.5 bg-white border border-gray-200 rounded-md shadow-lg z-10">
-                            <button type="button" onClick={() => { setProductFilter(null); setProductDropdownOpen(false) }} className="w-full text-left px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-50">All Products</button>
+                            <button type="button" onClick={() => { setProductFilter(null); setProductDropdownOpen(false) }} className="w-full text-left px-2.5 py-1.5 text-xs text-gray-700 hover:bg-grey-bg">All Products</button>
                             {PRODUCTS.map((p) => (
-                              <button key={p} type="button" onClick={() => { setProductFilter(p); setProductDropdownOpen(false) }} className="w-full text-left px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-50">{p}</button>
+                              <button key={p} type="button" onClick={() => { setProductFilter(p); setProductDropdownOpen(false) }} className="w-full text-left px-2.5 py-1.5 text-xs text-gray-700 hover:bg-grey-bg">{p}</button>
                             ))}
                           </div>
                         )}
@@ -293,9 +319,9 @@ function SummaryTabContent({ locations = [], onTotalsChange }) {
                         </button>
                         {feasibilityDropdownOpen && (
                           <div className="absolute left-0 right-0 top-full mt-0.5 py-0.5 bg-white border border-gray-200 rounded-md shadow-lg z-10">
-                            <button type="button" onClick={() => { setFeasibilityFilter(null); setFeasibilityDropdownOpen(false) }} className="w-full text-left px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-50">All Status</button>
-                            {FEASIBILITY_STATUSES.map((s) => (
-                              <button key={s} type="button" onClick={() => { setFeasibilityFilter(s); setFeasibilityDropdownOpen(false) }} className="w-full text-left px-2.5 py-1.5 text-xs text-gray-700 hover:bg-gray-50">{s}</button>
+                            <button type="button" onClick={() => { setFeasibilityFilter(null); setFeasibilityDropdownOpen(false) }} className="w-full text-left px-2.5 py-1.5 text-xs text-gray-700 hover:bg-grey-bg">All Status</button>
+                            {(showFeasibilityResults ? FEASIBILITY_RESULT_STATUSES : FEASIBILITY_STATUSES).map((s) => (
+                              <button key={s} type="button" onClick={() => { setFeasibilityFilter(s); setFeasibilityDropdownOpen(false) }} className="w-full text-left px-2.5 py-1.5 text-xs text-gray-700 hover:bg-grey-bg">{s}</button>
                             ))}
                           </div>
                         )}
@@ -329,7 +355,7 @@ function SummaryTabContent({ locations = [], onTotalsChange }) {
                       key={s}
                       type="button"
                       onClick={() => { setSearchInput(s); setShowSearchSuggestions(false) }}
-                      className="w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-50 truncate"
+                      className="w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-grey-bg truncate"
                     >
                       {s}
                     </button>
@@ -337,28 +363,32 @@ function SummaryTabContent({ locations = [], onTotalsChange }) {
                 </div>
               )}
             </div>
-            <button
-              type="button"
-              onClick={() => { setSearchFilter(searchInput.trim() || null); setShowSearchSuggestions(false) }}
-              className="p-1.5 border border-blue-600 rounded-full bg-white text-blue-600 hover:bg-blue-50 flex items-center justify-center w-9 h-9"
-              aria-label="Search"
-            >
+            <button type="button" className="p-1.5 text-gray-500 hover:bg-grey-bg rounded focus:outline-none" aria-label="Delete">
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
               </svg>
             </button>
+            <button type="button" className="p-1.5 text-gray-500 hover:bg-grey-bg rounded focus:outline-none" aria-label="Edit">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+              </svg>
+            </button>
+            <button type="button" className="px-4 py-1.5 border border-gray-300 rounded-md bg-white text-xs font-medium text-gray-700 hover:bg-grey-bg">Validate</button>
+            <button type="button" className="px-4 py-1.5 border border-gray-300 rounded-md bg-white text-xs font-medium text-gray-700 hover:bg-grey-bg">Enrich Quote</button>
+            <button type="button" className="px-4 py-1.5 border border-gray-300 rounded-md bg-white text-xs font-medium text-gray-700 hover:bg-grey-bg">Upload Documents</button>
+            <button type="button" className="px-4 py-1.5 rounded-md bg-airtel-red text-white text-xs font-medium hover:opacity-90">Manage Solution Bundle</button>
+            <span className="text-xs text-gray-500">View Selected ({selectedIds.size})</span>
           </div>
         </div>
-      </div>
 
       <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 text-xs border-b border-gray-100">
         <p className="text-gray-600">
-          Showing 1 to {Math.min(displayedCount, rowsToDisplay.length)} of {rowsToDisplay.length} records
+          Showing {totalRows === 0 ? '0' : (currentPage - 1) * PAGE_SIZE + 1} - {totalRows === 0 ? '0' : Math.min(currentPage * PAGE_SIZE, totalRows)} of {rowsToDisplay.length} records.
           {showFeasibilityErrorOnly && <span> • Showing only records with feasibility error</span>}
           {searchFilter != null && String(searchFilter).trim() !== '' && <span> • Matching search</span>}
         </p>
         {showFeasibilityErrorOnly ? (
-          <button type="button" onClick={() => setShowFeasibilityErrorOnly(false)} className="text-blue-600 hover:underline font-medium">
+          <button type="button" onClick={() => setShowFeasibilityErrorOnly(false)} className="text-airtel-red hover:underline font-medium">
             Show all records
           </button>
         ) : null}
@@ -367,85 +397,152 @@ function SummaryTabContent({ locations = [], onTotalsChange }) {
       <div className="overflow-x-auto flex flex-col min-h-0" style={{ height: '24rem' }}>
         <div className="overflow-y-auto border-b border-gray-100 min-h-0" style={{ height: '22rem' }}>
           <table className="w-full text-xs leading-tight table-fixed">
-            <thead className="sticky top-0 z-10 bg-gray-50">
-              <tr className="bg-gray-50 border-b border-gray-200">
-                <th className="w-10 pl-4 pr-2 py-1 text-left">
-                  <input type="checkbox" className="rounded-md border-gray-300 text-blue-600 w-3.5 h-3.5" aria-label="Select all" />
+            <thead className="sticky top-0 z-10 bg-gray-100">
+              <tr className="border-b border-gray-200">
+                <th className="w-10 pl-4 pr-2 py-3 text-left">
+                  <input
+                    ref={selectAllCheckboxRef}
+                    type="checkbox"
+                    className="rounded border-gray-300 text-airtel-red focus:ring-airtel-red/20 w-3.5 h-3.5"
+                    aria-label="Select all"
+                    checked={visibleRows.length > 0 && visibleRows.every((r) => selectedIds.has(r.id))}
+                    onChange={(e) => {
+                      const visibleIds = visibleRows.map((r) => r.id)
+                      if (e.target.checked) {
+                        setSelectedIds((prev) => new Set([...prev, ...visibleIds]))
+                      } else {
+                        setSelectedIds((prev) => {
+                          const next = new Set(prev)
+                          visibleIds.forEach((id) => next.delete(id))
+                          return next
+                        })
+                      }
+                    }}
+                  />
                 </th>
-                <th className="w-40 px-2 py-1 text-left font-semibold text-gray-700 text-xs">
-                  <span className="inline-flex items-center gap-0.5 truncate max-w-full">
-                    <SortIcon column="memberGroup" sortColumn={sortColumn} sortDirection={sortDirection} onClick={() => handleSort('memberGroup')} />
-                    <span className="truncate">Member/Group</span>
-                  </span>
-                </th>
-                <th className="w-24 px-2 py-1 text-left font-semibold text-gray-700 text-xs">
-                  <span className="inline-flex items-center gap-0.5 truncate max-w-full">
-                    <SortIcon column="product" sortColumn={sortColumn} sortDirection={sortDirection} onClick={() => handleSort('product')} />
-                    <span className="truncate">Product</span>
-                  </span>
-                </th>
-                <th className="w-28 px-2 py-1 text-left font-semibold text-gray-700 text-xs">
-                  <span className="inline-flex items-center gap-0.5 truncate max-w-full">
-                    <SortIcon column="feasibilityStatus" sortColumn={sortColumn} sortDirection={sortDirection} onClick={() => handleSort('feasibilityStatus')} />
-                    <span className="truncate">Feasibility Status</span>
-                  </span>
-                </th>
-                <th className="w-20 px-2 py-1 text-left font-semibold text-gray-700 text-xs">
-                  <span className="inline-flex items-center gap-0.5 truncate max-w-full">
-                    <SortIcon column="quantity" sortColumn={sortColumn} sortDirection={sortDirection} onClick={() => handleSort('quantity')} />
-                    <span className="truncate">Quantity</span>
-                  </span>
-                </th>
-                <th className="w-24 px-2 py-1 text-left font-semibold text-gray-700 text-xs">
-                  <span className="inline-flex items-center gap-0.5 truncate max-w-full">
-                    <SortIcon column="oneTimeTotal" sortColumn={sortColumn} sortDirection={sortDirection} onClick={() => handleSort('oneTimeTotal')} />
-                    <span className="truncate">One Time Total</span>
-                  </span>
-                </th>
-                <th className="w-24 px-2 py-1 text-left font-semibold text-gray-700 text-xs">
-                  <span className="inline-flex items-center gap-0.5 truncate max-w-full">
-                    <SortIcon column="recurringTotal" sortColumn={sortColumn} sortDirection={sortDirection} onClick={() => handleSort('recurringTotal')} />
-                    <span className="truncate">Recurring Total</span>
-                  </span>
-                </th>
-                <th className="w-28 px-2 py-1 text-left font-semibold text-gray-700 text-xs">Billing Account</th>
-                <th className="w-28 px-2 py-1 text-left font-semibold text-gray-700 text-xs">Service ID</th>
-                <th className="w-24 px-2 py-1 text-left font-semibold text-gray-700 truncate text-xs">Connect Date</th>
-                <th className="w-9 px-2 py-1" aria-label="Row actions" />
+                <th className="min-w-[6rem] px-2 py-3 text-left font-semibold text-gray-900 text-xs truncate">Member/Group</th>
+                <th className="w-20 px-2 py-3 text-left font-semibold text-gray-900 text-xs truncate">Site Floor</th>
+                <th className="w-16 px-2 py-3 text-left font-semibold text-gray-900 text-xs truncate">Media</th>
+                <th className="w-20 px-2 py-3 text-left font-semibold text-gray-900 text-xs truncate">Max Bandwidth</th>
+                <th className="w-14 px-2 py-3 text-left font-semibold text-gray-900 text-xs truncate">Tax</th>
+                <th className="w-20 px-2 py-3 text-left font-semibold text-gray-900 text-xs truncate">ERP Status</th>
+                <th className="w-16 px-2 py-3 text-left font-semibold text-gray-900 text-xs truncate">Quantity</th>
+                <th className="min-w-[5rem] px-2 py-3 text-left font-semibold text-gray-900 text-xs truncate">Product</th>
+                <th className="w-20 px-2 py-3 text-left font-semibold text-gray-900 text-xs truncate">Item Code</th>
+                <th className="w-24 px-2 py-3 text-left font-semibold text-gray-900 text-xs truncate">ARC Total</th>
+                <th className="w-20 px-2 py-3 text-left font-semibold text-gray-900 text-xs truncate">Feasibility Status</th>
+                <th className="w-20 px-2 py-3 text-left font-semibold text-gray-900 text-xs truncate">Cross Connect</th>
+                <th className="w-20 px-2 py-3 text-left font-semibold text-gray-900 text-xs truncate">Circuit Id</th>
+                <th className="w-24 px-2 py-3 text-left font-semibold text-gray-900 text-xs truncate">Change Request</th>
+                <th className="w-24 px-2 py-3 text-left font-semibold text-gray-900 text-xs truncate">Sub Activity</th>
+                <th className="w-20 px-2 py-3 text-left font-semibold text-gray-900 text-xs truncate">Recurring</th>
+                <th className="w-20 px-2 py-3 text-left font-semibold text-gray-900 text-xs truncate">One Time</th>
+                <th className="w-9 px-2 py-3" aria-label="Row actions" />
               </tr>
             </thead>
             <tbody>
               {visibleRows.map((row, idx) => (
                 <tr
                   key={row.id}
-                  className={`border-b border-gray-100 hover:bg-gray-50/50 ${idx % 2 === 1 ? 'bg-gray-50/30' : ''}`}
+                  className={`border-b border-gray-100 hover:bg-grey-bg/50 ${idx % 2 === 1 ? 'bg-grey-bg/30' : ''}`}
                 >
-                  <td className="pl-4 pr-2 py-1 align-middle">
-                    <input type="checkbox" className="rounded-md border-gray-300 text-blue-600 w-3.5 h-3.5" aria-label="Select row" />
+                  <td className="pl-4 pr-2 py-3 align-middle">
+                    <input
+                      type="checkbox"
+                      className="rounded border-gray-300 text-airtel-red focus:ring-airtel-red/20 w-3.5 h-3.5"
+                      aria-label="Select row"
+                      checked={selectedIds.has(row.id)}
+                      onChange={(e) => {
+                        setSelectedIds((prev) => {
+                          const next = new Set(prev)
+                          if (e.target.checked) next.add(row.id)
+                          else next.delete(row.id)
+                          return next
+                        })
+                      }}
+                    />
                   </td>
-                  <td className="px-2 py-1 text-gray-800 align-middle min-w-0 truncate" title={row.memberGroup}>{row.memberGroup || '—'}</td>
-                  <td className="px-2 py-1 text-gray-800 align-middle truncate">
-                    <span className="inline-flex items-center gap-1.5 min-w-0">
-                      {row.feasibilityStatus === 'Failure' && (
-                        <span className="shrink-0 flex items-center justify-center text-red-600" title="Product has feasibility/attribute error that needs fixing" aria-hidden>
-                          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
-                            <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
-                          </svg>
-                        </span>
-                      )}
-                      <span className="truncate">{row.product}</span>
+                  <td className="px-2 py-3 text-gray-800 align-middle truncate" title={row.memberGroup}>
+                    <span className="inline-flex flex-wrap items-center gap-y-1 gap-x-1.5 min-w-0">
+                      <span className="truncate">{row.memberGroup || '—'}</span>
+                      {updatedRowIdsSet.has(row.id) && UPDATED_BADGE}
                     </span>
                   </td>
-                  <td className="px-2 py-1 align-middle">
-                    <FeasibilityBadge status={row.feasibilityStatus} />
+                  <td className="px-2 py-3 text-gray-500 align-middle truncate">{row.siteFloor}</td>
+                  <td className="px-2 py-3 text-gray-500 align-middle truncate">{row.media}</td>
+                  <td className="px-2 py-3 text-gray-500 align-middle truncate">{row.maxBandwidth}</td>
+                  <td className="px-2 py-3 text-gray-500 align-middle truncate">{row.tax}</td>
+                  <td className="px-2 py-3 text-gray-500 align-middle truncate">{row.erpStatus}</td>
+                  <td className="px-2 py-3 text-gray-800 align-middle">{row.quantity}</td>
+                  <td className="px-2 py-3 text-gray-800 align-middle truncate">
+                    <span className="inline-flex items-center gap-1 min-w-0">
+                      {(() => {
+                        const hasFeasibilityError = row.feasibilityStatus === 'Failure'
+                        const hasInternetConfigError = row.product === 'Internet' && !updatedRowIdsSet.has(row.id)
+                        const showError = hasFeasibilityError || hasInternetConfigError
+                        const errorMessage = hasFeasibilityError
+                          ? (row.errorSummary || 'Error summary in a sentence.')
+                          : hasInternetConfigError
+                            ? INTERNET_CONFIG_ERROR_MESSAGE
+                            : ''
+                        if (!showError || !errorMessage) return null
+                        return (
+                          <button
+                            type="button"
+                            ref={(el) => { if (errorPopoverRow?.id === row.id) errorPopoverAnchorRef.current = el }}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              errorPopoverAnchorRef.current = e.currentTarget
+                              setErrorPopoverRow({ id: row.id, message: errorMessage })
+                            }}
+                            onMouseEnter={(e) => {
+                              if (errorPopoverCloseTimeoutRef.current) {
+                                clearTimeout(errorPopoverCloseTimeoutRef.current)
+                                errorPopoverCloseTimeoutRef.current = null
+                              }
+                              errorPopoverAnchorRef.current = e.currentTarget
+                              setErrorPopoverRow({ id: row.id, message: errorMessage })
+                            }}
+                            onMouseLeave={() => {
+                              errorPopoverCloseTimeoutRef.current = setTimeout(() => setErrorPopoverRow(null), 150)
+                            }}
+                            className="shrink-0 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border border-gray-200 focus:outline-none focus:ring-2 focus:ring-offset-0 focus:ring-[#A03565]/30"
+                            style={{ backgroundColor: '#FCEEF2' }}
+                            aria-label="View error summary"
+                          >
+                            <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="#A03565" strokeWidth={2.5} viewBox="0 0 24 24">
+                              <circle cx="12" cy="12" r="10" />
+                              <path strokeLinecap="round" d="M4.93 4.93l14.14 14.14" />
+                            </svg>
+                            <span className="text-xs font-medium" style={{ color: '#A03565' }}>Error</span>
+                          </button>
+                        )
+                      })()}
+                      <span className="truncate">{row.productDisplay ?? row.product}</span>
+                      {updatedRowIdsSet.has(row.id) && UPDATED_BADGE}
+                      {!updatedRowIdsSet.has(row.id) && updatedProductHighlight && row.product === updatedProductHighlight && (
+                        <span className="shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800 border border-green-300">
+                          Updated
+                        </span>
+                      )}
+                    </span>
                   </td>
-                  <td className="px-2 py-1 text-gray-800 align-middle">{row.quantity}</td>
-                  <td className="px-2 py-1 text-gray-800 align-middle">${row.oneTimeTotal}</td>
-                  <td className="px-2 py-1 text-gray-800 align-middle">${row.recurringTotal}</td>
-                  <td className="px-2 py-1 text-gray-500 align-middle truncate">{row.billingAccount}</td>
-                  <td className="px-2 py-1 text-gray-500 align-middle truncate">{row.serviceId}</td>
-                  <td className="px-2 py-1 text-gray-500 align-middle truncate">{row.connectDate}</td>
-                  <td className="px-2 py-1 align-middle">
+                  <td className="px-2 py-3 text-gray-500 align-middle truncate">{row.itemCode}</td>
+                  <td className="px-2 py-3 text-gray-800 align-middle truncate">{formatINR(row.arcTotal)}</td>
+                  <td className="px-2 py-3 align-middle">
+                    {showFeasibilityResults ? (
+                      <FeasibilityBadge status={row.feasibilityStatus} />
+                    ) : (
+                      <span className="text-gray-400">—</span>
+                    )}
+                  </td>
+                  <td className="px-2 py-3 text-gray-500 align-middle truncate">{row.crossConnect}</td>
+                  <td className="px-2 py-3 text-gray-500 align-middle truncate">{row.circuitId}</td>
+                  <td className="px-2 py-3 text-gray-800 align-middle truncate">{row.changeRequest}</td>
+                  <td className="px-2 py-3 text-gray-800 align-middle truncate">{row.subActivity}</td>
+                  <td className="px-2 py-3 text-gray-800 align-middle truncate">{row.recurringTotal === 0 ? '₹0.00' : formatINR(row.recurringTotal)}</td>
+                  <td className="px-2 py-3 text-gray-800 align-middle truncate">{formatINR(row.oneTimeTotal)}</td>
+                  <td className="px-2 py-3 align-middle">
                     <div
                       className="relative inline-block"
                       ref={openMenuRowId === row.id ? menuAnchorRef : null}
@@ -456,11 +553,11 @@ function SummaryTabContent({ locations = [], onTotalsChange }) {
                           e.stopPropagation()
                           setOpenMenuRowId((prev) => (prev === row.id ? null : row.id))
                         }}
-                        className="w-6 h-6 rounded-full border border-gray-300 flex items-center justify-center text-gray-500 hover:bg-gray-100 shrink-0"
+                        className="w-8 h-8 rounded-md border border-gray-200 bg-white flex items-center justify-center text-gray-500 hover:bg-gray-50 shrink-0 shadow-sm"
                         aria-label="Row actions"
                         aria-expanded={openMenuRowId === row.id}
                       >
-                        <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 20 20">
+                        <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
                           <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
                         </svg>
                       </button>
@@ -468,14 +565,17 @@ function SummaryTabContent({ locations = [], onTotalsChange }) {
                         <div className="absolute right-0 top-full mt-1 z-20 min-w-[6rem] py-1 bg-white border border-gray-300 rounded-lg shadow-sm">
                           <button
                             type="button"
-                            className="w-full px-3 py-1.5 text-left text-xs text-gray-700 hover:bg-gray-50"
-                            onClick={() => setOpenMenuRowId(null)}
+                            className="w-full px-3 py-1.5 text-left text-xs text-gray-700 hover:bg-grey-bg"
+                            onClick={() => {
+                              setOpenMenuRowId(null)
+                              onEditRow?.(row)
+                            }}
                           >
-                            Add Product
+                            Edit
                           </button>
                           <button
                             type="button"
-                            className="w-full px-3 py-1.5 text-left text-xs text-gray-700 hover:bg-gray-50"
+                            className="w-full px-3 py-1.5 text-left text-xs text-gray-700 hover:bg-grey-bg"
                             onClick={() => {
                               setDeleteModalRow({ id: row.id, memberGroup: row.memberGroup })
                               setOpenMenuRowId(null)
@@ -492,29 +592,87 @@ function SummaryTabContent({ locations = [], onTotalsChange }) {
             </tbody>
           </table>
         </div>
-        {hasMore && (
-          <div className="flex-shrink-0 flex items-center justify-center w-full px-2 min-h-[1.75rem] py-1 bg-white border-t border-gray-100 text-center">
+        {hasPagination && (
+          <div className="flex-shrink-0 flex items-center justify-center gap-4 w-full px-2 min-h-[2.5rem] py-2 bg-white border-t border-gray-200">
             <button
               type="button"
-              onClick={() => setDisplayedCount((prev) => Math.min(prev + 10, rowsToDisplay.length))}
-              className="text-blue-600 hover:underline font-medium text-xs"
+              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+              disabled={currentPage <= 1}
+              className="px-3 py-1.5 rounded-md border border-gray-300 bg-white text-xs font-medium text-airtel-red disabled:opacity-50 disabled:cursor-not-allowed hover:bg-grey-bg enabled:cursor-pointer"
             >
-              Load more
+              Previous
+            </button>
+            <span className="text-xs text-gray-800">Page {currentPage} of {totalPages}</span>
+            <button
+              type="button"
+              onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+              disabled={currentPage >= totalPages}
+              className="px-3 py-1.5 rounded-md border border-gray-300 bg-white text-xs font-medium text-airtel-red disabled:opacity-50 disabled:cursor-not-allowed hover:bg-grey-bg enabled:cursor-pointer"
+            >
+              Next
             </button>
           </div>
         )}
       </div>
 
-      {/* Delete confirmation modal - same as Extracted Information tab */}
+      {/* Error Summary popover – on click of error icon in Product column */}
+      {errorPopoverRow && errorPopoverAnchorRef.current && createPortal(
+        (() => {
+          const rect = errorPopoverAnchorRef.current.getBoundingClientRect()
+          return (
+            <div
+              className="fixed z-[200] w-72 rounded-xl bg-white shadow-lg border border-gray-200 overflow-visible"
+              style={{
+                top: rect.bottom + 8,
+                left: Math.max(8, Math.min(rect.left, typeof window !== 'undefined' ? window.innerWidth - 296 : rect.left)),
+              }}
+              role="dialog"
+              aria-labelledby="error-summary-title"
+              onMouseEnter={() => {
+                if (errorPopoverCloseTimeoutRef.current) {
+                  clearTimeout(errorPopoverCloseTimeoutRef.current)
+                  errorPopoverCloseTimeoutRef.current = null
+                }
+              }}
+              onMouseLeave={() => setErrorPopoverRow(null)}
+            >
+              <div
+                className="absolute left-4 -top-2 w-0 h-0 border-l-[8px] border-r-[8px] border-b-[8px] border-l-transparent border-r-transparent border-b-white"
+                style={{ filter: 'drop-shadow(0 -1px 0 rgb(229 231 235))' }}
+              />
+              <div className="p-4 pt-3 relative bg-white rounded-xl">
+                <div className="flex items-start justify-between gap-2">
+                  <h3 id="error-summary-title" className="text-sm font-bold text-gray-900 shrink-0">Error Summary</h3>
+                  <button
+                    type="button"
+                    onClick={() => setErrorPopoverRow(null)}
+                    className="shrink-0 p-1 rounded hover:bg-gray-100 text-gray-600 focus:outline-none focus:ring-2 focus:ring-gray-300"
+                    aria-label="Close"
+                  >
+                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+                <p className="text-sm text-gray-700 mt-1 leading-relaxed">{errorPopoverRow.message}</p>
+              </div>
+            </div>
+          )
+        })(),
+        document.body
+      )}
+
+      {/* Delete confirmation modal - matches attributes and other app modals; supports bulk delete when multiple rows selected */}
       {deleteModalRow && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-gray-900/50" aria-modal="true" role="dialog">
-          <div className="bg-white rounded-xl shadow-2xl max-w-md w-full overflow-hidden relative">
-            <div className="px-6 pt-8 pb-4 text-center border-b border-gray-200">
-              <h2 className="text-2xl font-bold text-[#003366]">Delete this record</h2>
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40" aria-modal="true" role="dialog" onClick={(e) => { if (e.target === e.currentTarget) { setDeleteModalRow(null); setApplyDeleteToSelectedRows(false) } }}>
+          <div className="bg-white rounded-xl border border-gray-200 shadow-xl max-w-md w-full overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
+              <span className="w-8 shrink-0" aria-hidden="true" />
+              <h2 id="delete-modal-title" className="flex-1 text-base font-bold text-[#032d60] text-center">Delete this record</h2>
               <button
                 type="button"
-                onClick={() => setDeleteModalRow(null)}
-                className="absolute top-4 right-4 p-2 rounded-full bg-white text-[#003366] hover:bg-gray-100 focus:outline-none"
+                onClick={() => { setDeleteModalRow(null); setApplyDeleteToSelectedRows(false) }}
+                className="w-8 h-8 shrink-0 p-1.5 rounded-lg text-gray-500 hover:bg-gray-100 focus:outline-none flex items-center justify-center"
                 aria-label="Close"
               >
                 <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
@@ -522,24 +680,43 @@ function SummaryTabContent({ locations = [], onTotalsChange }) {
                 </svg>
               </button>
             </div>
-            <p className="px-6 py-4 text-base text-[#444444] text-center leading-relaxed border-b border-gray-200">
+            <p className="px-5 py-4 text-sm text-gray-700 leading-relaxed">
               Are you sure you want to delete this record for {deleteModalRow.memberGroup}?
             </p>
-            <div className="flex justify-end gap-3 px-6 py-6">
+            {selectedIds.size >= 2 && (
+              <div className="shrink-0 px-5 py-2 border-t border-gray-100">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={applyDeleteToSelectedRows}
+                    onChange={(e) => setApplyDeleteToSelectedRows(e.target.checked)}
+                    className="rounded border-gray-300 text-airtel-red focus:ring-airtel-red"
+                  />
+                  <span className="text-sm text-gray-700">Delete selected ({selectedIds.size}) items</span>
+                </label>
+              </div>
+            )}
+            <div className="border-t border-gray-200 px-5 py-4 flex justify-end gap-2">
               <button
                 type="button"
-                onClick={() => setDeleteModalRow(null)}
-                className="px-5 py-2.5 text-base font-normal text-[#003366] bg-transparent border border-gray-500 rounded-full hover:bg-gray-50"
+                onClick={() => { setDeleteModalRow(null); setApplyDeleteToSelectedRows(false) }}
+                className="px-4 py-2 text-sm font-medium rounded-lg border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-gray-300 focus:ring-offset-1"
               >
                 Cancel
               </button>
               <button
                 type="button"
                 onClick={() => {
-                  setDeletedIds((prev) => new Set(prev).add(deleteModalRow.id))
+                  if (applyDeleteToSelectedRows && selectedIds.size >= 2) {
+                    setDeletedIds((prev) => new Set([...prev, ...selectedIds]))
+                    setSelectedIds(new Set())
+                  } else {
+                    setDeletedIds((prev) => new Set(prev).add(deleteModalRow.id))
+                  }
                   setDeleteModalRow(null)
+                  setApplyDeleteToSelectedRows(false)
                 }}
-                className="px-5 py-2.5 text-base font-normal text-white bg-[#003366] rounded-full hover:bg-[#002244]"
+                className="px-4 py-2 text-sm font-medium rounded-lg bg-airtel-red text-white hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-airtel-red focus:ring-offset-1"
               >
                 Delete
               </button>
@@ -552,4 +729,3 @@ function SummaryTabContent({ locations = [], onTotalsChange }) {
 }
 
 export default SummaryTabContent
-export { buildSummaryRows }

@@ -2,6 +2,27 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Hide native calendar icon in date inputs that have custom SVG overlay (removes duplicate icons) */
+input[type="date"].date-input-custom::-webkit-calendar-picker-indicator {
+  opacity: 0;
+  position: absolute;
+  right: 0;
+  width: 100%;
+  height: 100%;
+  cursor: pointer;
+}
+
+/* Checkbox selection: Airtel red branding (native checkbox checked/indeterminate) */
+input[type="checkbox"]:checked,
+input[type="checkbox"]:indeterminate {
+  accent-color: #E4002B;
+}
+
+/* Screenshot area grey – match screenshot 1 (#F5F5F5) */
+.bg-screenshot-grey {
+  background-color: #F5F5F5 !important;
+}
+
 body {
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
@@ -9,5 +30,5 @@ body {
     sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background: #f3f3f3;
+  background: #ffffff;
 }

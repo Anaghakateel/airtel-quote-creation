@@ -16,7 +16,7 @@ function TabsSection({ extractedInfoCount = 5000, locationsCount = 0, summaryCou
             onClick={() => onTabChange?.(tab.id)}
             className={`px-4 py-3 text-xs font-medium border-b-2 -mb-px ${
               activeTab === tab.id
-                ? 'text-blue-600 border-blue-600'
+                ? 'text-airtel-red font-semibold border-airtel-red'
                 : 'text-gray-600 border-transparent hover:text-gray-900 hover:border-gray-300'
             }`}
           >

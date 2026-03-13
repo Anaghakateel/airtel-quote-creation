@@ -1,6 +1,9 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import agentforceIcon from './AgentforceIcon.png'
 import AgentforceSidePanel from './AgentforceSidePanel'
+
+const AGENTFORCE_CONVERSATION_SNAPSHOT_KEY = 'agentforce_conversation_snapshot'
 
 function getStoredQuoteRestore(key) {
   if (!key) return null
@@ -15,24 +18,75 @@ function getStoredQuoteRestore(key) {
   }
 }
 
-// Default "Quote" panel state (screenshot instant: Create a Quote flow after upload + extraction complete)
-const DEFAULT_QUOTE_PANEL_SNAPSHOT = {
-  isConversationView: true,
-  messages: [
-    { id: 'create-quote-welcome', role: 'agent', text: 'Hi! I can assist you with that. You can upload the document directly. Would you like to proceed with uploading a document or another type of document?' },
-    { id: 'upload-quote', role: 'user', text: 'Uploaded "Quote Proposal Data.pdf"' },
-    { id: 'extraction-done', role: 'agent', text: 'Your file is being processed, you will be notified once done, or you can check the status here' },
-  ],
-  hasNotification: true,
+function getStoredConversationSnapshot() {
+  try {
+    const s = localStorage.getItem(AGENTFORCE_CONVERSATION_SNAPSHOT_KEY)
+    if (!s) return null
+    const j = JSON.parse(s)
+    if (j && typeof j.isConversationView === 'boolean' && Array.isArray(j.messages)) return j
+    return null
+  } catch (_) {
+    return null
+  }
 }
 
-function Header({ activeNavTab = 'Quote', onNavClick, onNavigateToQuoteExtractedInfo, onNavigateToUpdatedQuote, updatedQuoteNotification = false, onNavigateToUpdatedQuote2, updatedQuoteProposal2Notification = false, onNavigateToUpdatedQuote3, updatedQuoteProposal3Notification = false, onNavigateToUpdatedQuote4, updatedQuoteProposal4Notification = false, attributesUpdatedNotification = false, onAttributesUpdated, onNavigateToAttributesUpdatedView, restoreQuoteAgentforceKey, quoteActionsRef }) {
-  const stored = restoreQuoteAgentforceKey ? getStoredQuoteRestore(restoreQuoteAgentforceKey) : null
-  const [agentforcePanelOpen, setAgentforcePanelOpen] = useState(!!(stored?.panelOpen))
+// Default Quote 1 panel state: full create-quote conversation so the chat around "Create quote" / "create proposal" is shown when panel is opened on Quote 1
+const DEFAULT_QUOTE1_PANEL_SNAPSHOT = {
+  isConversationView: true,
+  messages: [
+    { id: 'u1', role: 'user', text: 'Create quote' },
+    { id: 'a1', role: 'agent', text: 'Hi! I can assist you with that. You can upload the document directly. Would you like to proceed with uploading the document or any other type of document?' },
+    { id: 'u2', role: 'user', text: 'Yes' },
+    { id: 'a2', role: 'agent', text: 'Upload file' },
+    { id: 'u3', role: 'user', text: 'Updated the document (Quotes_2026-03-08.xlsx)' },
+    { id: 'a3', role: 'agent', text: 'Your file is being processed, you will be notified once done, or you can check the status here', showQuoteProposalStatusLink: true },
+  ],
+  hasNotification: false,
+}
+
+function Header({ activeNavTab = 'Quote', onNavClick, selectedQuote = 'Quote 1', onQuoteSelect, onNavigateToQuoteExtractedInfo, onNavigateToUpdatedQuote, updatedQuoteNotification = false, onNavigateToUpdatedQuote2, updatedQuoteProposal2Notification = false, onNavigateToUpdatedQuote3, updatedQuoteProposal3Notification = false, onNavigateToUpdatedQuote4, updatedQuoteProposal4Notification = false, attributesUpdatedNotification = false, onAttributesUpdated, onNavigateToAttributesUpdatedView, updatedMatchedProductsNotification = false, onNavigateToUpdatedMatchedProducts, updatedRequestedValuesNotification = false, onNavigateToUpdatedRequestedValues, onUpdatedRequestedValuesCreated, onMarkAllNotificationsRead, feasibilityProposalNotification = false, onNavigateToFeasibilityProposal, validateQuoteNotification = false, onNavigateToValidatedQuote, updatedConfigurationsToQuoteNotification = false, onNavigateToUpdatedConfigurationsToQuote, onMarkAllNotificationsReadOnNavigateToQuote, restoreQuoteAgentforceKey, quoteActionsRef, agentforcePanelOpen: agentforcePanelOpenProp, onAgentforcePanelChange, skipOpenPanelOnHomeRef, onNavigateToQuote2, onQuote2POUpdated, quote2ProgressStage = 'Draft', onMatchProductsResponseShown, onMatchProductsAnalysisStart, onMatchProductsAnalysisEnd, onVerifyDetailsResponseShown, onVerifyDetailsAnalysisStart, onVerifyDetailsAnalysisEnd, onAddProductsResponseShown, onAddProductsAnalysisStart, onAddProductsAnalysisEnd, onUpdateChangeAnalysisStart, onUpdateChangeAnalysisEnd, updatedUpgradeQuoteNotification = false, onNavigateToUpgradeQuote, onUpgradeQuoteCreated }) {
+  const effectiveRestoreKey =
+    restoreQuoteAgentforceKey && activeNavTab === 'Quote' && selectedQuote
+      ? `${restoreQuoteAgentforceKey}_${String(selectedQuote).replace(/\s/g, '')}`
+      : restoreQuoteAgentforceKey
+  const stored = effectiveRestoreKey ? getStoredQuoteRestore(effectiveRestoreKey) : null
+  const [agentforcePanelOpenLocal, setAgentforcePanelOpenLocal] = useState(!!(stored?.panelOpen))
+  const agentforcePanelOpen = onAgentforcePanelChange != null ? agentforcePanelOpenProp : agentforcePanelOpenLocal
+  const setAgentforcePanelOpen = onAgentforcePanelChange ?? setAgentforcePanelOpenLocal
   const [bellNotification, setBellNotification] = useState(false)
   const [notificationPopoverOpen, setNotificationPopoverOpen] = useState(false)
+  const [quoteDropdownOpen, setQuoteDropdownOpen] = useState(false)
   const panelStateRef = useRef(null)
   const notificationPopoverRef = useRef(null)
+  const quoteDropdownRef = useRef(null)
+  const quoteButtonRef = useRef(null)
+  const [quoteDropdownPosition, setQuoteDropdownPosition] = useState({ top: 0, left: 0 })
+
+  // Single handler for "Updated Quote Proposal with Matched Products" – same action for both bell popup and agentic chat link (navigate, clear notification). Panel stays open unless user closes it.
+  const handleNavigateToMatchedProducts = useCallback(() => {
+    setBellNotification(false)
+    setNotificationPopoverOpen(false)
+    onNavigateToUpdatedQuote?.()
+    onMarkAllNotificationsRead?.()
+    // Ensure red dot stays cleared after navigation/state updates
+    setTimeout(() => setBellNotification(false), 0)
+  }, [onNavigateToUpdatedQuote, onMarkAllNotificationsRead])
+
+  // Single handler for "Updated Quote Proposal with Verified Details" – used by both bell popup and agent conversation link
+  const handleNavigateToVerifiedDetails = useCallback(() => {
+    onNavigateToUpdatedQuote2?.()
+    setNotificationPopoverOpen(false)
+    setBellNotification(false)
+    onMarkAllNotificationsRead?.()
+  }, [onNavigateToUpdatedQuote2, onMarkAllNotificationsRead])
+
+  // Single handler for "Added Products from Extracted Information" – used by both bell popup and agent conversation link
+  const handleNavigateToAddedProductsFromExtracted = useCallback(() => {
+    onNavigateToUpdatedQuote4?.()
+    setNotificationPopoverOpen(false)
+    setBellNotification(false)
+    onMarkAllNotificationsRead?.()
+  }, [onNavigateToUpdatedQuote4, onMarkAllNotificationsRead])
 
   useEffect(() => {
     if (!notificationPopoverOpen) return
@@ -44,23 +98,56 @@ function Header({ activeNavTab = 'Quote', onNavClick, onNavigateToQuoteExtracted
     document.addEventListener('mousedown', handleClickOutside)
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [notificationPopoverOpen])
-  const hadRestoreFromStorageRef = useRef(!!(stored?.panelOpen))
-  const initialRestoreSnapshotRef = useRef(
-    stored?.snapshot && typeof stored.snapshot.isConversationView === 'boolean' && Array.isArray(stored.snapshot.messages)
-      ? stored.snapshot
-      : stored?.panelOpen
-        ? DEFAULT_QUOTE_PANEL_SNAPSHOT
-        : null
-  )
-  // When on Quote and opening the panel (not from refresh), show "Extraction is complete" instant
-  const snapshotToPass =
-    hadRestoreFromStorageRef.current ? initialRestoreSnapshotRef.current : (activeNavTab === 'Quote' && agentforcePanelOpen ? DEFAULT_QUOTE_PANEL_SNAPSHOT : null)
 
   useEffect(() => {
-    if (restoreQuoteAgentforceKey && activeNavTab !== 'Quote') {
-      try { localStorage.removeItem(restoreQuoteAgentforceKey) } catch (_) {}
+    if (!quoteDropdownOpen) return
+    const handleClickOutside = (e) => {
+      const inButton = quoteButtonRef.current && quoteButtonRef.current.contains(e.target)
+      const inDropdown = e.target.closest?.('[data-quote-dropdown]')
+      if (!inButton && !inDropdown) setQuoteDropdownOpen(false)
     }
-  }, [restoreQuoteAgentforceKey, activeNavTab])
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [quoteDropdownOpen])
+
+  // When user goes to Quote (e.g. via "here" link or bell notification), show the conversation that happened so far; prefer persisted conversation snapshot so chat from Home is reflected on Quote page
+  const conversationSnapshot = getStoredConversationSnapshot()
+  const snapshotToPass =
+    agentforcePanelOpen
+      ? activeNavTab === 'Quote'
+            ? (conversationSnapshot?.messages?.length
+            ? conversationSnapshot
+            : stored?.snapshot && typeof stored.snapshot.isConversationView === 'boolean' && Array.isArray(stored.snapshot.messages)
+              ? stored.snapshot
+              : selectedQuote === 'Quote 1' || selectedQuote === 'MACD Quote' || (selectedQuote === 'Quote 2' && quote2ProgressStage === 'Draft')
+                ? DEFAULT_QUOTE1_PANEL_SNAPSHOT
+                : null)
+        : conversationSnapshot?.messages?.length
+          ? conversationSnapshot
+          : null
+      : null
+
+  useEffect(() => {
+    if (effectiveRestoreKey && activeNavTab !== 'Quote') {
+      try { localStorage.removeItem(effectiveRestoreKey) } catch (_) {}
+    }
+  }, [effectiveRestoreKey, activeNavTab])
+
+  // When Quote page opens, clear the red dot on the bell icon (except "Updated Configurations to Quote" which is set while on Quote)
+  useEffect(() => {
+    if (activeNavTab === 'Quote') {
+      setBellNotification(false)
+      onMarkAllNotificationsReadOnNavigateToQuote?.()
+    }
+  }, [activeNavTab, onMarkAllNotificationsReadOnNavigateToQuote])
+
+  // On Home page, show the Agentforce panel on top of the content by default (unless Refresh was just clicked)
+  useEffect(() => {
+    if (activeNavTab === 'Home') {
+      if (!skipOpenPanelOnHomeRef?.current) setAgentforcePanelOpen(true)
+      if (skipOpenPanelOnHomeRef) skipOpenPanelOnHomeRef.current = false
+    }
+  }, [activeNavTab, setAgentforcePanelOpen])
 
   const navItems = [
     { label: 'Home', hasChevron: false },
@@ -77,15 +164,11 @@ function Header({ activeNavTab = 'Quote', onNavClick, onNavigateToQuoteExtracted
   return (
     <>
     <header className="bg-white border-b border-gray-200 sticky top-0 z-[60]">
-      {/* Top row: logo (left), search (center), utility icons (right) */}
+      {/* Top row: logo (left), search (center), status pills + utility icons (right) */}
       <div className="flex items-center justify-between gap-4 px-6 py-3">
         <div className="shrink-0 w-[120px]">
-          <a href="/" className="inline-block focus:outline-none" aria-label="Airtel home">
-            <img
-              src="https://upload.wikimedia.org/wikipedia/commons/1/18/Airtel_logo.svg"
-              alt="Airtel"
-              className="h-8 w-auto object-contain object-left"
-            />
+          <a href="/" className="inline-flex items-center focus:outline-none text-airtel-red font-bold text-xl tracking-tight" aria-label="Airtel home" style={{ fontFamily: 'system-ui, sans-serif' }}>
+            airtel
           </a>
         </div>
 
@@ -97,7 +180,7 @@ function Header({ activeNavTab = 'Quote', onNavClick, onNavigateToQuoteExtracted
             <input
               type="text"
               placeholder="Search..."
-              className="w-full pl-11 pr-5 py-2.5 border border-gray-300 rounded-full bg-white text-xs placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
+              className="w-full pl-11 pr-5 py-2.5 border border-gray-300 rounded-full bg-white text-xs placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-airtel-red/20 focus:border-airtel-red"
             />
           </div>
         </div>
@@ -106,13 +189,13 @@ function Header({ activeNavTab = 'Quote', onNavClick, onNavigateToQuoteExtracted
           <button
             type="button"
             onClick={() => setAgentforcePanelOpen(true)}
-            className="p-2 rounded-full text-gray-600 hover:bg-gray-100"
+            className="p-2 rounded-full text-gray-600 hover:bg-grey-bg"
             aria-label="Agentforce"
           >
             <img src={agentforceIcon} alt="Agentforce" className="w-5 h-5 object-contain" />
           </button>
-          <button type="button" className="flex items-center rounded-full overflow-hidden border border-gray-200 hover:bg-gray-50" aria-label="Favorites">
-            <span className="p-2 bg-gray-50 border-r border-gray-200">
+          <button type="button" className="flex items-center rounded-full overflow-hidden border border-gray-200 hover:bg-grey-bg" aria-label="Favorites">
+            <span className="p-2 bg-grey-bg border-r border-gray-200">
               <svg className="w-5 h-5 text-amber-500" fill="currentColor" viewBox="0 0 24 24">
                 <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
               </svg>
@@ -123,22 +206,22 @@ function Header({ activeNavTab = 'Quote', onNavClick, onNavigateToQuoteExtracted
               </svg>
             </span>
           </button>
-          <button type="button" className="p-2 rounded-full text-gray-600 hover:bg-gray-100" aria-label="Add">
+          <button type="button" className="p-2 rounded-full text-gray-600 hover:bg-grey-bg" aria-label="Add">
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
             </svg>
           </button>
-          <button type="button" className="p-2 rounded-full text-gray-600 hover:bg-gray-100" aria-label="Module">
+          <button type="button" className="p-2 rounded-full text-gray-600 hover:bg-grey-bg" aria-label="Module">
             <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
               <path d="M4 18l4-6 3 4 3-6 4 8H4z" />
             </svg>
           </button>
-          <button type="button" className="p-2 rounded-full text-gray-600 hover:bg-gray-100" aria-label="Help">
+          <button type="button" className="p-2 rounded-full text-gray-600 hover:bg-grey-bg" aria-label="Help">
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.228 9c.549-1.165 2.03-2 3.772-2 2.21 0 4 1.343 4 3 0 1.4-1.278 2.575-3.006 2.907-.542.104-.994.54-.994 1.093m0 3h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
           </button>
-          <button type="button" className="p-2 rounded-full text-gray-600 hover:bg-gray-100" aria-label="Settings">
+          <button type="button" className="p-2 rounded-full text-gray-600 hover:bg-grey-bg" aria-label="Settings">
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
@@ -148,15 +231,15 @@ function Header({ activeNavTab = 'Quote', onNavClick, onNavigateToQuoteExtracted
             <button
               type="button"
               onClick={() => setNotificationPopoverOpen((prev) => !prev)}
-              className="relative p-2 rounded-full text-gray-600 hover:bg-gray-100"
+              className="relative p-2 rounded-full text-gray-600 hover:bg-grey-bg"
               aria-label="Notifications"
               aria-expanded={notificationPopoverOpen}
             >
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
               </svg>
-              {(bellNotification || updatedQuoteNotification || updatedQuoteProposal2Notification || updatedQuoteProposal3Notification || updatedQuoteProposal4Notification || attributesUpdatedNotification) && (
-                <span className="absolute top-1 right-1 w-2.5 h-2.5 rounded-full bg-red-500 ring-2 ring-white" aria-hidden="true" />
+              {(bellNotification || updatedQuoteNotification || updatedQuoteProposal2Notification || updatedQuoteProposal3Notification || updatedQuoteProposal4Notification || attributesUpdatedNotification || updatedMatchedProductsNotification || updatedRequestedValuesNotification || feasibilityProposalNotification || validateQuoteNotification || updatedConfigurationsToQuoteNotification || updatedUpgradeQuoteNotification) && (
+                <span className="absolute -top-0.5 right-0 min-w-[18px] h-[18px] px-1 rounded-full bg-airtel-red text-white text-[10px] font-bold flex items-center justify-center ring-2 ring-white">1</span>
               )}
             </button>
             {notificationPopoverOpen && (
@@ -166,17 +249,17 @@ function Header({ activeNavTab = 'Quote', onNavClick, onNavigateToQuoteExtracted
                   <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
                     <h3 className="text-sm font-semibold text-gray-900">Notifications</h3>
                     <div className="flex items-center gap-2">
-                      <button
+                        <button
                         type="button"
-                        onClick={() => { setBellNotification(false); setNotificationPopoverOpen(false) }}
-                        className="text-xs font-medium text-blue-600 hover:text-blue-700"
+                        onClick={() => { setBellNotification(false); onMarkAllNotificationsRead?.(); setNotificationPopoverOpen(false) }}
+                        className="text-xs font-medium text-airtel-red hover:text-red-700"
                       >
                         Mark all as read
                       </button>
                       <button
                         type="button"
                         onClick={() => setNotificationPopoverOpen(false)}
-                        className="p-1 rounded text-gray-500 hover:bg-gray-100"
+                        className="p-1 rounded text-gray-500 hover:bg-grey-bg"
                         aria-label="Close notifications"
                       >
                         <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
@@ -187,19 +270,122 @@ function Header({ activeNavTab = 'Quote', onNavClick, onNavigateToQuoteExtracted
                   </div>
                   <div className="max-h-64 overflow-y-auto py-2">
                     {(() => {
-                      const mostRecent = attributesUpdatedNotification ? 'attributes' : updatedQuoteProposal4Notification ? 'proposal4' : updatedQuoteProposal3Notification ? 'proposal3' : updatedQuoteProposal2Notification ? 'proposal2' : updatedQuoteNotification ? 'proposal1' : 'new'
-                      const linkClass = (isRecent) => isRecent ? 'text-sm font-semibold text-blue-600 hover:text-blue-800 hover:underline text-left w-full' : 'text-sm font-semibold text-gray-400 hover:text-gray-600 text-left w-full'
+                      const mostRecent = updatedUpgradeQuoteNotification ? 'upgradeQuote' : updatedConfigurationsToQuoteNotification ? 'updatedConfigurationsToQuote' : validateQuoteNotification ? 'validatedQuote' : feasibilityProposalNotification ? 'feasibility' : updatedRequestedValuesNotification ? 'updatedRequestedValues' : updatedMatchedProductsNotification ? 'matchedProducts' : attributesUpdatedNotification ? 'attributes' : updatedQuoteProposal4Notification ? 'proposal4' : updatedQuoteProposal3Notification ? 'proposal3' : updatedQuoteProposal2Notification ? 'proposal2' : updatedQuoteNotification ? 'proposal1' : 'new'
+                      const linkClass = (isRecent) => isRecent ? 'text-sm font-semibold text-airtel-red hover:text-red-800 hover:underline text-left w-full' : 'text-sm font-semibold text-gray-400 hover:text-gray-600 text-left w-full'
                       const timeClass = (isRecent) => isRecent ? 'text-xs text-gray-600 mt-0.5' : 'text-xs text-gray-400 mt-0.5'
                       return (
                         <>
+                    {updatedUpgradeQuoteNotification && (
+                      <div className="px-4 py-3 hover:bg-grey-bg border-b border-gray-100">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onNavigateToUpgradeQuote?.()
+                            setNotificationPopoverOpen(false)
+                            setBellNotification(false)
+                            onMarkAllNotificationsRead?.()
+                          }}
+                          className={linkClass(mostRecent === 'upgradeQuote')}
+                        >
+                          New Quote for Upgrades for HDFC Bank
+                        </button>
+                        <p className={timeClass(mostRecent === 'upgradeQuote')}>Just now</p>
+                      </div>
+                    )}
+                    {updatedConfigurationsToQuoteNotification && (
+                      <div className="px-4 py-3 hover:bg-grey-bg border-b border-gray-100">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onNavigateToUpdatedConfigurationsToQuote?.()
+                            setNotificationPopoverOpen(false)
+                            setBellNotification(false)
+                            onMarkAllNotificationsRead?.()
+                          }}
+                          className={linkClass(mostRecent === 'updatedConfigurationsToQuote')}
+                        >
+                          Updated Configurations to Quote for HDFC Bank
+                        </button>
+                        <p className={timeClass(mostRecent === 'updatedConfigurationsToQuote')}>Just now</p>
+                      </div>
+                    )}
+                    {validateQuoteNotification && (
+                      <div className="px-4 py-3 hover:bg-grey-bg border-b border-gray-100">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onNavigateToValidatedQuote?.()
+                            setNotificationPopoverOpen(false)
+                            setBellNotification(false)
+                            onMarkAllNotificationsRead?.()
+                          }}
+                          className={linkClass(mostRecent === 'validatedQuote')}
+                        >
+                          Validated Quote for HDFC Bank
+                        </button>
+                        <p className={timeClass(mostRecent === 'validatedQuote')}>Just now</p>
+                      </div>
+                    )}
+                    {feasibilityProposalNotification && (
+                      <div className="px-4 py-3 hover:bg-grey-bg border-b border-gray-100">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onNavigateToFeasibilityProposal?.()
+                            setNotificationPopoverOpen(false)
+                            setBellNotification(false)
+                            onMarkAllNotificationsRead?.()
+                          }}
+                          className={linkClass(mostRecent === 'feasibility')}
+                        >
+                          Updated proposal with Feasibility status
+                        </button>
+                        <p className={timeClass(mostRecent === 'feasibility')}>Just now</p>
+                      </div>
+                    )}
+                    {updatedRequestedValuesNotification && (
+                      <div className="px-4 py-3 hover:bg-grey-bg border-b border-gray-100">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onNavigateToUpdatedRequestedValues?.()
+                            setNotificationPopoverOpen(false)
+                            setBellNotification(false)
+                            onMarkAllNotificationsRead?.()
+                          }}
+                          className={linkClass(mostRecent === 'updatedRequestedValues')}
+                        >
+                          Updated Quote proposal with requested Changes for HDFC Bank
+                        </button>
+                        <p className={timeClass(mostRecent === 'updatedRequestedValues')}>Just now</p>
+                      </div>
+                    )}
+                    {updatedMatchedProductsNotification && (
+                      <div className="px-4 py-3 hover:bg-grey-bg border-b border-gray-100">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onNavigateToUpdatedMatchedProducts?.()
+                            setNotificationPopoverOpen(false)
+                            setBellNotification(false)
+                            onMarkAllNotificationsRead?.()
+                          }}
+                          className={linkClass(mostRecent === 'matchedProducts')}
+                        >
+                          Updated Matched Products
+                        </button>
+                        <p className={timeClass(mostRecent === 'matchedProducts')}>Just now</p>
+                      </div>
+                    )}
                     {attributesUpdatedNotification && (
-                      <div className="px-4 py-3 hover:bg-gray-50 border-b border-gray-100">
+                      <div className="px-4 py-3 hover:bg-grey-bg border-b border-gray-100">
                         <button
                           type="button"
                           onClick={() => {
                             onNavigateToAttributesUpdatedView?.()
                             setNotificationPopoverOpen(false)
-                            setAgentforcePanelOpen(false)
+                            setBellNotification(false)
+                            onMarkAllNotificationsRead?.()
                           }}
                           className={linkClass(mostRecent === 'attributes')}
                         >
@@ -209,81 +395,70 @@ function Header({ activeNavTab = 'Quote', onNavClick, onNavigateToQuoteExtracted
                       </div>
                     )}
                     {updatedQuoteProposal4Notification && (
-                      <div className={`px-4 py-3 hover:bg-gray-50 ${(updatedQuoteProposal3Notification || attributesUpdatedNotification) ? 'border-b border-gray-100' : ''}`}>
+                      <div className={`px-4 py-3 hover:bg-grey-bg ${(updatedQuoteProposal3Notification || attributesUpdatedNotification) ? 'border-b border-gray-100' : ''}`}>
                         <button
                           type="button"
-                          onClick={() => {
-                            onNavigateToUpdatedQuote4?.()
-                            setNotificationPopoverOpen(false)
-                            setAgentforcePanelOpen(false)
-                          }}
+                          onClick={handleNavigateToAddedProductsFromExtracted}
                           className={linkClass(mostRecent === 'proposal4')}
                         >
-                          Updated Quote Proposal 4
+                          Added products from Extracted information
                         </button>
                         <p className={timeClass(mostRecent === 'proposal4')}>Just now</p>
                       </div>
                     )}
                     {(updatedQuoteProposal3Notification || updatedQuoteProposal4Notification) && (
-                      <div className={`px-4 py-3 hover:bg-gray-50 ${updatedQuoteProposal4Notification ? 'border-b border-gray-100' : 'border-b border-gray-100'}`}>
+                      <div className={`px-4 py-3 hover:bg-grey-bg ${updatedQuoteProposal4Notification ? 'border-b border-gray-100' : 'border-b border-gray-100'}`}>
                         <button
                           type="button"
                           onClick={() => {
                             onNavigateToUpdatedQuote3?.()
                             setNotificationPopoverOpen(false)
-                            setAgentforcePanelOpen(false)
+                            setBellNotification(false)
+                            onMarkAllNotificationsRead?.()
                           }}
                           className={linkClass(mostRecent === 'proposal3')}
                         >
-                          Updated Quote Proposal 3
+                          Updated Quote proposal with all the verified records
                         </button>
                         <p className={timeClass(mostRecent === 'proposal3')}>Just now</p>
                       </div>
                     )}
                     {(updatedQuoteProposal2Notification || updatedQuoteProposal3Notification || updatedQuoteProposal4Notification) && (
-                      <div className={`px-4 py-3 hover:bg-gray-50 ${(updatedQuoteProposal3Notification || updatedQuoteProposal4Notification) ? 'border-b border-gray-100' : ''}`}>
+                      <div className={`px-4 py-3 hover:bg-grey-bg ${(updatedQuoteProposal3Notification || updatedQuoteProposal4Notification) ? 'border-b border-gray-100' : ''}`}>
                         <button
                           type="button"
-                          onClick={() => {
-                            onNavigateToUpdatedQuote2?.()
-                            setNotificationPopoverOpen(false)
-                            setAgentforcePanelOpen(false)
-                          }}
+                          onClick={handleNavigateToVerifiedDetails}
                           className={linkClass(mostRecent === 'proposal2')}
                         >
-                          Updated Quote Proposal 2
+                          Updated Quote Proposal with Verified Details
                         </button>
                         <p className={timeClass(mostRecent === 'proposal2')}>Just now</p>
                       </div>
                     )}
                     {(updatedQuoteNotification || updatedQuoteProposal2Notification || updatedQuoteProposal3Notification || updatedQuoteProposal4Notification || attributesUpdatedNotification) && (
-                      <div className={`px-4 py-3 hover:bg-gray-50 ${updatedQuoteProposal2Notification ? 'border-b border-gray-100' : ''}`}>
+                      <div className={`px-4 py-3 hover:bg-grey-bg ${updatedQuoteProposal2Notification ? 'border-b border-gray-100' : ''}`}>
                         <button
                           type="button"
-                          onClick={() => {
-                            onNavigateToUpdatedQuote?.()
-                            setNotificationPopoverOpen(false)
-                            setAgentforcePanelOpen(false)
-                          }}
+                          onClick={handleNavigateToMatchedProducts}
                           className={linkClass(mostRecent === 'proposal1')}
                         >
-                          Updated Quote Proposal
+                          Updated Quote Proposal with Matched Products for HDFC Bank
                         </button>
                         <p className={timeClass(mostRecent === 'proposal1')}>Just now</p>
                       </div>
                     )}
-                    <div className={`px-4 py-3 hover:bg-gray-50 ${(updatedQuoteNotification || updatedQuoteProposal2Notification || updatedQuoteProposal3Notification || updatedQuoteProposal4Notification || attributesUpdatedNotification) ? 'border-b border-gray-100' : ''} last:border-b-0`}>
+                    <div className={`px-4 py-3 hover:bg-grey-bg ${(updatedQuoteNotification || updatedQuoteProposal2Notification || updatedQuoteProposal3Notification || updatedQuoteProposal4Notification || attributesUpdatedNotification) ? 'border-b border-gray-100' : ''} last:border-b-0`}>
                       <button
                         type="button"
                         onClick={() => {
                           onNavigateToQuoteExtractedInfo?.()
                           setNotificationPopoverOpen(false)
                           setBellNotification(false)
-                          setAgentforcePanelOpen(false)
+                          onMarkAllNotificationsRead?.()
                         }}
                         className={linkClass(mostRecent === 'new')}
                       >
-                        New Quote Proposal created
+                        New Quote proposal created for HDFC Bank
                       </button>
                       <p className={timeClass(mostRecent === 'new')}>15 seconds ago</p>
                     </div>
@@ -305,26 +480,88 @@ function Header({ activeNavTab = 'Quote', onNavClick, onNavigateToQuoteExtracted
         </div>
       </div>
 
-      {/* Second row: Global nav - App launcher + Sales Console, then nav links */}
-      <div className="border-t border-gray-100 bg-white">
+      {/* Second row: Global nav - App launcher + Sales, then nav links; red underline for active */}
+      <div className="border-t border-gray-100 bg-white border-b-2 border-airtel-red">
         <nav className="flex items-center gap-1 px-6 py-2 overflow-x-auto">
           <div className="flex items-center gap-2 shrink-0 mr-2">
-            <button type="button" className="p-1.5 rounded-lg text-gray-600 hover:bg-gray-100" aria-label="App launcher">
+            <button type="button" className="p-1.5 rounded-lg text-gray-600 hover:bg-grey-bg" aria-label="App launcher">
               <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
                 <path d="M4 8h4V4H4v4zm6 12h4v-4h-4v4zm-6 0h4v-4H4v4zm0-6h4v-4H4v4zm6 0h4v-4h-4v4zm6-10v4h4V4h-4zm-6 4h4V4h-4v4zm6 6h4v-4h-4v4zm0 6h4v-4h-4v4z" />
               </svg>
             </button>
-            <span className="text-xs font-bold text-[#032d60]">Sales Console</span>
+            <span className="text-xs font-bold text-gray-900">Sales</span>
           </div>
-          {navItems.map((item) => (
+          {navItems.map((item) => {
+            if (item.label === 'Quote') {
+              return (
+                <div key={item.label} className="relative flex items-center shrink-0" ref={quoteDropdownRef}>
+                  <button
+                    ref={quoteButtonRef}
+                    type="button"
+                    onClick={() => {
+                      onNavClick?.('Quote')
+                      if (quoteButtonRef.current) {
+                        const rect = quoteButtonRef.current.getBoundingClientRect()
+                        setQuoteDropdownPosition({ top: rect.bottom + 4, left: rect.left })
+                      }
+                      setQuoteDropdownOpen((prev) => !prev)
+                    }}
+                    className={`flex items-center gap-1 px-3 py-2 rounded-lg text-xs font-medium whitespace-nowrap ${
+                      activeNavTab === 'Quote'
+                        ? 'text-airtel-red font-semibold border-b-2 border-airtel-red pb-2 -mb-0.5 bg-transparent'
+                        : 'text-gray-700 hover:bg-grey-bg'
+                    }`}
+                    aria-expanded={quoteDropdownOpen}
+                    aria-haspopup="listbox"
+                  >
+                    Quote
+                    <svg className="w-3.5 h-3.5 text-current" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
+                    </svg>
+                  </button>
+                  {quoteDropdownOpen && createPortal(
+                    <div
+                      data-quote-dropdown
+                      className="fixed z-[100] min-w-[120px] bg-white rounded-lg shadow-lg border border-gray-200 py-1"
+                      style={{ top: quoteDropdownPosition.top, left: quoteDropdownPosition.left }}
+                      role="listbox"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => { onQuoteSelect?.('Quote 1'); setQuoteDropdownOpen(false); onNavClick?.('Quote') }}
+                        className={`w-full text-left px-4 py-2 text-xs font-medium whitespace-nowrap ${selectedQuote === 'Quote 1' ? 'text-airtel-red bg-red-50' : 'text-gray-700 hover:bg-grey-bg'}`}
+                      >
+                        Create Quote
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { onQuoteSelect?.('Quote 2'); setQuoteDropdownOpen(false); onNavClick?.('Quote') }}
+                        className={`w-full text-left px-4 py-2 text-xs font-medium whitespace-nowrap ${selectedQuote === 'Quote 2' ? 'text-airtel-red bg-red-50' : 'text-gray-700 hover:bg-grey-bg'}`}
+                      >
+                        Enrich Quote
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { onQuoteSelect?.('MACD Quote'); setQuoteDropdownOpen(false); onNavClick?.('Quote') }}
+                        className={`w-full text-left px-4 py-2 text-xs font-medium whitespace-nowrap ${selectedQuote === 'MACD Quote' ? 'text-airtel-red bg-red-50' : 'text-gray-700 hover:bg-grey-bg'}`}
+                      >
+                        MACD Quote
+                      </button>
+                    </div>,
+                    document.body
+                  )}
+                </div>
+              )
+            }
+            return (
             <button
               key={item.label}
               type="button"
               onClick={() => onNavClick?.(item.label)}
               className={`flex items-center gap-1 px-3 py-2 rounded-lg text-xs font-medium whitespace-nowrap ${
                 item.label === activeNavTab
-                  ? 'text-[#0176d3] border-b-2 border-[#0176d3] pb-2 -mb-0.5 bg-transparent'
-                  : 'text-[#032d60] hover:bg-gray-100'
+                  ? 'text-airtel-red font-semibold border-b-2 border-airtel-red pb-2 -mb-0.5 bg-transparent'
+                  : 'text-gray-700 hover:bg-grey-bg'
               }`}
             >
               {item.label}
@@ -334,43 +571,80 @@ function Header({ activeNavTab = 'Quote', onNavClick, onNavigateToQuoteExtracted
                 </svg>
               )}
             </button>
-          ))}
+          );
+          })}
         </nav>
       </div>
     </header>
     <AgentforceSidePanel
+        key={activeNavTab === 'Quote' ? selectedQuote || 'Quote 1' : 'default'}
         open={agentforcePanelOpen}
-        quoteActionsRef={quoteActionsRef}
         activeNavTab={activeNavTab}
-        onNavigateToQuote={() => {
-          onNavigateToQuoteExtractedInfo?.()
-          setAgentforcePanelOpen(false)
-        }}
-        onNavigateToUpdatedQuote={() => {
-          onNavigateToUpdatedQuote?.()
-          setAgentforcePanelOpen(false)
-        }}
         onClose={() => {
-          setAgentforcePanelOpen(false)
-          if (restoreQuoteAgentforceKey && activeNavTab === 'Quote') {
-            try { localStorage.removeItem(restoreQuoteAgentforceKey) } catch (_) {}
+          if (!panelStateRef.current?.isPinned) {
+            setAgentforcePanelOpen(false)
+            if (effectiveRestoreKey && activeNavTab === 'Quote') {
+              try { localStorage.removeItem(effectiveRestoreKey) } catch (_) {}
+            }
           }
         }}
-        onAnalysisComplete={() => setBellNotification(true)}
-        onAttributesUpdated={onAttributesUpdated}
-        onNavigateToQuoteView={(productName) => {
-          onNavigateToAttributesUpdatedView?.(productName)
-          setAgentforcePanelOpen(false)
+        onNavigateToQuote2={onNavigateToQuote2}
+        onQuote2POUpdated={onQuote2POUpdated}
+        onNavigateToNewQuoteProposal={onNavigateToQuoteExtractedInfo}
+        onNavigateToMatchedProducts={handleNavigateToMatchedProducts}
+        onNavigateToVerifiedDetails={handleNavigateToVerifiedDetails}
+        onNavigateToAddedProductsFromExtracted={handleNavigateToAddedProductsFromExtracted}
+        onNavigateToFeasibilityProposal={onNavigateToFeasibilityProposal}
+        onNavigateToValidatedQuote={onNavigateToValidatedQuote}
+        onNavigateToUpdatedRequestedValues={(intentText) => {
+          onNavigateToUpdatedRequestedValues?.(intentText)
         }}
+        onUpdatedRequestedValuesCreated={onUpdatedRequestedValuesCreated}
+        onQuoteProposalCreated={() => setBellNotification(true)}
+        onMatchProductsStatusShown={() => {
+          setBellNotification(true)
+          setNotificationPopoverOpen(true)
+          onMatchProductsResponseShown?.()
+        }}
+        onMatchProductsAnalysisStart={onMatchProductsAnalysisStart}
+        onMatchProductsAnalysisEnd={onMatchProductsAnalysisEnd}
+        onVerifyDetailsStatusShown={() => {
+          setBellNotification(true)
+          setNotificationPopoverOpen(true)
+          onVerifyDetailsResponseShown?.()
+        }}
+        onVerifyDetailsAnalysisStart={onVerifyDetailsAnalysisStart}
+        onVerifyDetailsAnalysisEnd={onVerifyDetailsAnalysisEnd}
+        onAddProductsStatusShown={() => {
+          setBellNotification(true)
+          setNotificationPopoverOpen(true)
+          onAddProductsResponseShown?.()
+        }}
+        onAddProductsAnalysisStart={onAddProductsAnalysisStart}
+        onAddProductsAnalysisEnd={onAddProductsAnalysisEnd}
+        onUpdateChangeAnalysisStart={onUpdateChangeAnalysisStart}
+        onUpdateChangeAnalysisEnd={onUpdateChangeAnalysisEnd}
+        onUpgradeQuoteCreated={() => {
+          setBellNotification(true)
+          setNotificationPopoverOpen(true)
+          onUpgradeQuoteCreated?.()
+        }}
+        onNavigateToUpgradeQuote={onNavigateToUpgradeQuote}
         initialRestoreSnapshot={snapshotToPass}
         onPanelStateChange={(snapshot) => {
           panelStateRef.current = snapshot
-          if (restoreQuoteAgentforceKey && activeNavTab === 'Quote' && agentforcePanelOpen && snapshot) {
+          if (snapshot) {
             try {
-              localStorage.setItem(restoreQuoteAgentforceKey, JSON.stringify({
+              const payload = { isConversationView: snapshot.isConversationView, messages: snapshot.messages || [], hasNotification: snapshot.hasNotification ?? false, isPinned: snapshot.isPinned ?? false }
+              localStorage.setItem(AGENTFORCE_CONVERSATION_SNAPSHOT_KEY, JSON.stringify(payload))
+            } catch (_) {}
+          }
+          if (effectiveRestoreKey && activeNavTab === 'Quote' && agentforcePanelOpen && snapshot) {
+            try {
+              localStorage.setItem(effectiveRestoreKey, JSON.stringify({
                 tab: 'Quote',
                 panelOpen: true,
-                snapshot: { isConversationView: snapshot.isConversationView, messages: snapshot.messages || [], hasNotification: snapshot.hasNotification ?? false },
+                snapshot: { isConversationView: snapshot.isConversationView, messages: snapshot.messages || [], hasNotification: snapshot.hasNotification ?? false, isPinned: snapshot.isPinned ?? false },
               }))
             } catch (_) {}
           }
